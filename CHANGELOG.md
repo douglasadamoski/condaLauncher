@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.3 (2026-11-08)
+
+- Fixed: when a picker with fewer rows followed a longer one (e.g. the banner question
+  after the env list), the extra rows of the previous picker stayed on screen. Every
+  redraw now clears below its last row.
+
 ## v0.1.2 (2026-11-08)
 
 - Logo colour markup: `{r} {g} {b} {y} {m} {c} {d} {B}` pick theme colours inside a logo

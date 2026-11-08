@@ -23,7 +23,7 @@ CL_LOGO=""                      # or paste pre-rendered art here (a logo.txt bes
 
 # =============================== ENGINE =====================================
 # Do not edit below this line in a tool's launcher: `upgrade` replaces it.
-CL_LAUNCHER_VERSION="0.1.2"
+CL_LAUNCHER_VERSION="0.1.3"
 
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
@@ -212,7 +212,10 @@ _frame_flush() {
   for ((i = 0; i < n; i++)); do
     [ "${FRAME[i]}" = "${PREV[i]-$'\001'}" ] || o+=$'\033['"$((i + 1))"';1H'"${FRAME[i]}"$'\033[K'
   done
-  (( m > n )) && o+=$'\033['"$((n + 1))"$';1H\033[J'
+  # always clear below the frame: PREV is emptied when a new picker starts, so its
+  # length says nothing about how tall the previous picker was (a shorter picker
+  # after a longer one left the old rows on screen)
+  o+=$'\033['"$((n + 1))"$';1H\033[J'
   o+=$'\033[?2026l'
   printf '%s' "$o" >&"$TTY"
   PREV=("${FRAME[@]}")
