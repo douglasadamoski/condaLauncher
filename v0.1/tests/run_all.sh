@@ -67,6 +67,13 @@ out="$("$L" stop --version v0.2 --yes </dev/null 2>&1)"; rc=$?
 [ -z "$(http 18762)" ] && ok "port 18762 freed" || bad "port 18762 freed"
 [[ $(http 18761) == *"v0.1"* ]] && ok "v0.1 still up" || bad "v0.1 still up"
 
+echo "-- banner text"
+"$L" stop --version v0.1 --yes </dev/null >/dev/null 2>&1
+out="$("$L" start --version v0.1 --env "$ENVP" --banner on --yes </dev/null 2>&1)"
+[[ $(http 18761) == *"DEVELOPMENT v0.1 — not for real experiments"* ]] && ok "default banner template expands {VERSION}" || bad "default banner template" "$(http 18761 | tail -c 300)"
+"$L" stop --version v0.1 --yes </dev/null >/dev/null 2>&1
+"$L" start --version v0.1 --env "$ENVP" --banner off --yes </dev/null >/dev/null 2>&1
+
 echo "-- busy port falls back"
 python3 -m http.server 18762 --bind 127.0.0.1 >/dev/null 2>&1 & BLOCK_PID=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -n "$(http 18762)" ] && break; sleep 0.2; done

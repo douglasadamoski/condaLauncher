@@ -35,16 +35,23 @@ my-tool/
 
 | Key | Action |
 |---|---|
-| ↑ ↓, j k, mouse wheel | move |
-| Enter, left click | choose (one click runs the item) |
+| ↑ ↓, j k, mouse wheel, moving the mouse over a row | move the highlight |
+| Enter, left click | choose (the click runs on release, over the row it was pressed on) |
 | 1–9 | run that entry directly |
 | Home End PgUp PgDn | jump |
 | space, a | toggle, toggle all (Stop checklist) |
 | q, Esc | back / exit |
 
+The screen is redrawn only where it changed, and the launcher stays in one full-screen
+session from the main menu through the last picker, so nothing flashes between steps.
+Mouse reports in SGR (1006), X10 and urxvt (1015) encodings are all understood. To see
+exactly what a terminal sends, run with `CL_DEBUG_KEYS=/path/keys.txt`: one line per
+key or mouse event, with the raw bytes.
+
 To select text while the menu is open, hold Shift (PuTTY, MobaXterm, xterm) or Alt
 (VS Code) while dragging. To turn mouse capture off, pass `--no-mouse`, or set
-`LAUNCHER_MOUSE=0` or `MOUSE=0` in site.env. In tmux, clicks reach the menu only with
+`LAUNCHER_MOUSE=0` or `MOUSE=0` in site.env; `CL_MOUSE_HOVER=0` keeps clicks but stops
+hover tracking. In tmux, clicks reach the menu only with
 `set -g mouse on`.
 
 After an action the launcher exits and leaves its summary on screen; servers keep running.

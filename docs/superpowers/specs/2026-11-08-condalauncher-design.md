@@ -24,7 +24,7 @@ building a tool's dev-banner UI (the launcher only passes `CL_BANNER`).
 | Name | condaLauncher; per-tool file `launch-<tool>.sh` |
 | Logo | block letters (built-in font), vertical gradient, inline with `logo.txt` override, falls back to a one-line wordmark when narrow |
 | Look | Tokyo Night (night/day by background detection), Unicode with ASCII fallback, pointer `❯` menu, running badges, braille spinner, tab title |
-| Input | full-screen alt screen; mouse on with `--no-mouse`; single click runs; arrows, j/k, 1–9, q/Esc; flags plus a numbered prompt without a terminal; no idle timeout |
+| Input | full-screen alt screen; mouse on with `--no-mouse`; hover highlights, a click runs on release (changed after the first MobaXterm test, v0.1.1); arrows, j/k, 1–9, q/Esc; flags plus a numbered prompt without a terminal; no idle timeout |
 | Config | config block between markers plus a per-version `deploy/version.env`; `upgrade` swaps the engine |
 | Versions | `v*` folders that contain the entry file; preselect the last one started on this host |
 | Banner | env var `CL_BANNER`; default on for ROLE=dev; template `DEVELOPMENT {VERSION} — not for real experiments`; Start order: version, env, banner |

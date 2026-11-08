@@ -33,7 +33,7 @@ CL_STOP_TIMEOUT=5
 
 # =============================== ENGINE =====================================
 # Do not edit below this line in a tool's launcher: `upgrade` replaces it.
-CL_LAUNCHER_VERSION="0.1.0"
+CL_LAUNCHER_VERSION="0.1.1"
 
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
@@ -66,7 +66,8 @@ NOW_EPOCH() { printf '%(%s)T' -1; }
 : "${CL_STOP_TIMEOUT:=10}"
 : "${CL_VERSION_ENV:=deploy/version.env}"
 : "${CL_ENV_RECORD:=deploy/launcher.local}"
-: "${CL_BANNER_TEMPLATE:=DEVELOPMENT {VERSION} — not for real experiments}"
+# (a "}" inside ${VAR:=default} would end the expansion early, hence the plain if)
+[ -n "${CL_BANNER_TEMPLATE:-}" ] || CL_BANNER_TEMPLATE='DEVELOPMENT {VERSION} — not for real experiments'
 : "${CL_PORT_SCAN:=50}"
 : "${CL_LOG_KEEP:=5}"
 : "${CL_LOG_WARN_MB:=50}"
@@ -188,20 +189,43 @@ _tty_size() { # sets ROWS COLS
   [[ $ROWS =~ ^[0-9]+$ && $ROWS -gt 0 ]] || ROWS=24
   [[ $COLS =~ ^[0-9]+$ && $COLS -gt 0 ]] || COLS=80
 }
+# Full-screen mode. It stays on across consecutive pickers (no flash between them)
+# and is switched off only when normal output is printed (out, ask_*, print_header).
+# Mouse: 1000 = clicks, 1003 = motion too (hover highlight), 1006 = SGR encoding.
+MOUSE_HOVER="${CL_MOUSE_HOVER:-1}"; WINCHED=1; FRAME=(); PREV=()
 _raw_on() {
   [ "$RAW_ON" = 1 ] && return
   STTY_SAVED="$(stty -g <&"$TTY" 2>/dev/null)"
   stty -echo -icanon min 1 time 0 <&"$TTY" 2>/dev/null
-  printf '\033[?1049h\033[?25l' >&"$TTY"; ALT_ON=1
-  [ "$MOUSE" = 1 ] && printf '\033[?1000h\033[?1006h' >&"$TTY"
-  RAW_ON=1
+  printf '\033[?1049h\033[?25l\033[H\033[2J' >&"$TTY"; ALT_ON=1
+  if [ "$MOUSE" = 1 ]; then
+    printf '\033[?1000h' >&"$TTY"; [ "$MOUSE_HOVER" = 1 ] && printf '\033[?1003h' >&"$TTY"; printf '\033[?1006h' >&"$TTY"
+  fi
+  PREV=(); WINCHED=1; RAW_ON=1
+  trap 'WINCHED=1' WINCH
 }
 _raw_off() {
   [ "$RAW_ON" = 1 ] || return 0
-  [ "$MOUSE" = 1 ] && printf '\033[?1006l\033[?1000l' >&"$TTY"
+  [ "$MOUSE" = 1 ] && printf '\033[?1006l\033[?1003l\033[?1000l' >&"$TTY"
+  # swallow input already in flight (the release of the last click, motion reports),
+  # or it would be echoed onto the normal screen
+  local _junk; while IFS= read -rsn1 -t 0.05 -u "$TTY" _junk; do :; done
   printf '\033[?25h\033[?1049l' >&"$TTY"; ALT_ON=0
   [ -n "$STTY_SAVED" ] && stty "$STTY_SAVED" <&"$TTY" 2>/dev/null
+  trap - WINCH
   RAW_ON=0
+}
+# Draw FRAME (one string per screen row), sending only the rows that changed since
+# the last draw, inside a synchronized-update block (ignored where unsupported).
+_frame_flush() {
+  local o=$'\033[?2026h' i n=${#FRAME[@]} m=${#PREV[@]}
+  for ((i = 0; i < n; i++)); do
+    [ "${FRAME[i]}" = "${PREV[i]-$'\001'}" ] || o+=$'\033['"$((i + 1))"';1H'"${FRAME[i]}"$'\033[K'
+  done
+  (( m > n )) && o+=$'\033['"$((n + 1))"$';1H\033[J'
+  o+=$'\033[?2026l'
+  printf '%s' "$o" >&"$TTY"
+  PREV=("${FRAME[@]}")
 }
 _cleanup() { _raw_off; [ -n "${SPIN_PID:-}" ] && kill "$SPIN_PID" 2>/dev/null; [ "$TTY_OK" = 1 ] && printf '\033[?25h' >&"$TTY"; }
 trap _cleanup EXIT
@@ -276,13 +300,13 @@ header_lines() { # width -> HDR array
   if (( nrun > 0 )); then tag+="${C_OK}${G_DOT} ${nrun} running${C_0}"; else tag+="${C_DIM}${G_ODOT} none running${C_0}"; fi
   HDR+=("" "$tag")
 }
-print_header() { [ "$JSON" = 1 ] && return; local w=80; [ "$TTY_OK" = 1 ] && { _tty_size; w=$COLS; }; header_lines "$w"; printf '%s\n' "${HDR[@]}" ""; }
+print_header() { [ "$JSON" = 1 ] && return; [ "$RAW_ON" = 1 ] && _raw_off; local w=80; [ "$TTY_OK" = 1 ] && { _tty_size; w=$COLS; }; header_lines "$w"; printf '%s\n' "${HDR[@]}" ""; }
 
 # ================================================================ output ====
 REPORT=""; STEP_N=0; N_PASS=0; N_FAIL=0; N_WARN=0; T0_ACTION=0; T0_STEP=0; FAILS=(); FIXES=()
 _ms() { local t="${EPOCHREALTIME:-}"; if [ -n "$t" ]; then t="${t/[.,]/}"; echo $(( t / 1000 )); else echo $(( $(NOW_EPOCH) * 1000 )); fi; }
 _strip() { sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g; s/\x1b\\]8;;[^\x1b]*\x1b\\\\//g; s/\x1b\\][^\a]*\a//g'; }
-out() { [ "$JSON" = 1 ] && return; printf '%s\n' "$*"; [ -n "$REPORT" ] && printf '%s\n' "$*" | _strip >> "$REPORT"; return 0; }
+out() { [ "$JSON" = 1 ] && return; [ "$RAW_ON" = 1 ] && _raw_off; printf '%s\n' "$*"; [ -n "$REPORT" ] && printf '%s\n' "$*" | _strip >> "$REPORT"; return 0; }
 report_begin() { # action [version]
   STEP_N=0; N_PASS=0; N_FAIL=0; N_WARN=0; FAILS=(); FIXES=(); T0_ACTION="$(_ms)"
   mkdir -p "$RUN_DIR/reports" 2>/dev/null && _mode "$RUN_DIR" "$RUN_DIR/reports"
@@ -354,22 +378,41 @@ spin_run() { # message outfile cmd...
 
 # ============================================================ input / menu ==
 KEY=""
-_read_key() { # timeout(optional) -> KEY
+_read_key() { # timeout(optional) -> KEY (and RAWKEY for the debug trace)
   local c ch rest t="${1:-}"
+  RAWKEY=""
   if [ -n "$t" ]; then IFS= read -rsn1 -t "$t" -u "$TTY" c || { KEY=timeout; return 1; }
   else IFS= read -rsn1 -u "$TTY" c || { KEY=eof; return 1; }; fi
+  RAWKEY="$c"
   case "$c" in
     $'\e')
-      if IFS= read -rsn1 -t 0.05 -u "$TTY" ch; then
+      # over SSH the rest of a sequence can arrive a little later: wait 100 ms for the
+      # byte after ESC (a lone ESC is a cancel), then 300 ms per byte inside a sequence
+      if IFS= read -rsn1 -t 0.1 -u "$TTY" ch; then
+        RAWKEY+="$ch"
         if [[ $ch == '[' || $ch == 'O' ]]; then
           rest=""
-          while IFS= read -rsn1 -t 0.05 -u "$TTY" c; do rest+="$c"; [[ $c =~ [A-Za-z~] ]] && break; done
+          while IFS= read -rsn1 -t 0.3 -u "$TTY" c; do rest+="$c"; [[ $c =~ [A-Za-z~] ]] && break; done
+          RAWKEY+="$rest"
           case "$ch$rest" in
             '[A'|'OA') KEY=up ;; '[B'|'OB') KEY=down ;; '[C'|'OC') KEY=right ;; '[D'|'OD') KEY=left ;;
             '[H'|'OH'|'[1~'|'[7~') KEY=home ;; '[F'|'OF'|'[4~'|'[8~') KEY=end ;;
             '[5~') KEY=pgup ;; '[6~') KEY=pgdn ;;
-            '[<'*) KEY="mouse:${rest#<}" ;;
-            *) KEY=unknown ;;
+            '[<'*[Mm]) KEY="mouse:${rest#<}" ;;                       # SGR 1006: ESC[<b;x;yM|m
+            '[M')                                                     # X10 / normal: ESC[M + 3 raw bytes
+              local cb cx cy b
+              LC_ALL=C IFS= read -rsn1 -t 0.3 -d '' -u "$TTY" cb; LC_ALL=C IFS= read -rsn1 -t 0.3 -d '' -u "$TTY" cx
+              LC_ALL=C IFS= read -rsn1 -t 0.3 -d '' -u "$TTY" cy
+              printf -v cb '%d' "'$cb"; printf -v cx '%d' "'$cx"; printf -v cy '%d' "'$cy"
+              b=$(( cb - 32 ))
+              if (( (b & 3) == 3 && (b & 64) == 0 )); then
+                if (( b & 32 )); then KEY="mouse:35;$((cx - 32));$((cy - 32))M"; else KEY="mouse:0;$((cx - 32));$((cy - 32))m"; fi
+              else KEY="mouse:$b;$((cx - 32));$((cy - 32))M"; fi ;;
+            *)
+              if [[ $rest =~ ^([0-9]+)\;([0-9]+)\;([0-9]+)M$ ]]; then         # urxvt 1015: ESC[b;x;yM
+                local b=$(( BASH_REMATCH[1] - 32 )) x="${BASH_REMATCH[2]}" y="${BASH_REMATCH[3]}"
+                if (( (b & 3) == 3 && (b & 64) == 0 && (b & 32) == 0 )); then KEY="mouse:0;$x;${y}m"; else KEY="mouse:$b;$x;${y}M"; fi
+              else KEY=unknown; fi ;;
           esac
         else KEY=esc; fi
       else KEY=esc; fi ;;
@@ -378,12 +421,14 @@ _read_key() { # timeout(optional) -> KEY
     [0-9]) KEY="digit:$c" ;;
     *) KEY="char:$c" ;;
   esac
-  [ -n "${CL_DEBUG_KEYS:-}" ] && printf '%s\n' "$KEY" >> "$CL_DEBUG_KEYS"
+  [ -n "${CL_DEBUG_KEYS:-}" ] && printf '%s\t%q\n' "$KEY" "$RAWKEY" >> "$CL_DEBUG_KEYS"
   return 0
 }
 # Generic picker. Items are "label<TAB>hint<TAB>flags" (flags: d = disabled).
 # Sets MENU_IDX. Returns 0 chosen, 1 cancelled, 2 no terminal.
 # With multi=1: space toggles, a = all, Enter confirms; sets MENU_SEL (indices).
+# Mouse: moving over a row highlights it; a click (press and release on the same row)
+# chooses it -- or toggles it in a checklist. The wheel moves the highlight.
 MENU_IDX=-1; MENU_SEL=()
 menu_pick() { # title subtitle preselect multi items...
   local title="$1" sub="$2" cur="${3:-0}" multi="${4:-0}"; shift 4
@@ -398,79 +443,87 @@ menu_pick() { # title subtitle preselect multi items...
   # never preselect a disabled entry
   if [[ ${dis[cur]} == *d* ]]; then for ((i = 0; i < n; i++)); do [[ ${dis[i]} != *d* ]] && { cur=$i; break; }; done; fi
   if [ "$TTY_OK" != 1 ]; then _menu_fallback "$title" "$cur" "$multi" "${items[@]}"; return $?; fi
-  local -a rowof=() ; local first_row=0 top=0 note=""
+  local -a rowof=() hdr=(); local top=0 note="" pressed=-1 dirty=1 line
   _raw_on
-  local oldsize=""
+  WINCHED=1
   while :; do
-    _tty_size
-    header_lines "$COLS"
-    local buf=$'\033[H' line r=1
-    for line in "${HDR[@]}"; do buf+="${line}"$'\033[K\n'; r=$((r + 1)); done
-    buf+=$'\033[K\n'; r=$((r + 1))
-    buf+="  ${C_B}${title}${C_0}  ${C_DIM}${sub}${C_0}"$'\033[K\n'; r=$((r + 1))
-    buf+=$'\033[K\n'; r=$((r + 1))
-    # visible window
-    local avail=$(( ROWS - r - 2 )); (( avail < 3 )) && avail=3
-    (( cur < top )) && top=$cur
-    (( cur >= top + avail )) && top=$(( cur - avail + 1 ))
-    first_row=$r; rowof=()
-    for ((i = top; i < n && i < top + avail; i++)); do
-      local mark="  " box="" style="" num=""
-      (( i < 9 )) && num="$((i + 1))  " || num="   "
-      [ "$multi" = 1 ] && { [ "${sel[i]}" = 1 ] && box="${C_OK}${G_BOXON}${C_0} " || box="${G_BOXOFF} "; }
-      if [[ ${dis[i]} == *d* ]]; then style="$C_DIM"; fi
-      if (( i == cur )); then mark="${C_OK}${G_PTR}${C_0} "; line="  ${mark}${box}${C_B}${style}${num}${lab[i]}${C_0}"
-      else line="    ${box}${C_DIM}${num}${C_0}${style}${lab[i]}${C_0}"; [ -z "$style" ] && line="    ${box}${C_DIM}${num}${lab[i]}${C_0}"; fi
-      if [ -n "${hin[i]}" ]; then   # one screen row per item, or clicks land on the wrong row
-        local h="${hin[i]}" room=$(( COLS - labw - 14 ))
-        h="${h/#$HOME/\~}"
-        (( room < 8 )) && h="" || { (( ${#h} > room )) && h="${G_ELL}${h: -$((room - 1))}"; }
-        line+="   ${C_DIM}${h}${C_0}"
-      fi
-      buf+="${line}"$'\033[K\n'; rowof[r]=$i; r=$((r + 1))
-    done
-    buf+=$'\033[K\n'
-    if [ -n "$note" ]; then buf+="  ${C_WARN}${note}${C_0}"$'\033[K\n'
-    elif [ "$multi" = 1 ]; then buf+="  ${C_DIM}${G_UPDN}/jk move ${G_DOTS} space toggle ${G_DOTS} a all ${G_DOTS} ${G_ENTER} confirm ${G_DOTS} q cancel${C_0}"$'\033[K\n'
-    else buf+="  ${C_DIM}${G_UPDN}/jk move ${G_DOTS} ${G_ENTER} select ${G_DOTS} 1-$(( n < 9 ? n : 9 )) jump ${G_DOTS} click ${G_DOTS} q back${C_0}"$'\033[K\n'; fi
-    buf+=$'\033[J'
-    printf '%s' "$buf" >&"$TTY"
-    note=""
-    _read_key 1 || { [ "$KEY" = timeout ] && continue; _raw_off; return 1; }
+    if [ "$WINCHED" = 1 ]; then
+      # size and header (which counts running servers) only when the window changes,
+      # never per mouse event: motion reports arrive dozens of times a second
+      local oldsz="${ROWS:-0}x${COLS:-0}"
+      WINCHED=0; _tty_size; header_lines "$COLS"; hdr=("${HDR[@]}")
+      [ "$oldsz" != "${ROWS}x${COLS}" ] && printf '\033[H\033[2J' >&"$TTY"
+      PREV=(); dirty=1
+    fi
+    if [ "$dirty" = 1 ]; then
+      FRAME=("${hdr[@]}" "" "  ${C_B}${title}${C_0}  ${C_DIM}${sub}${C_0}" "")
+      local r=$(( ${#FRAME[@]} + 1 ))
+      local avail=$(( ROWS - r - 2 )); (( avail < 3 )) && avail=3
+      (( cur < top )) && top=$cur
+      (( cur >= top + avail )) && top=$(( cur - avail + 1 ))
+      rowof=()
+      for ((i = top; i < n && i < top + avail; i++)); do
+        local box="" style="" num=""
+        (( i < 9 )) && num="$((i + 1))  " || num="   "
+        [ "$multi" = 1 ] && { [ "${sel[i]}" = 1 ] && box="${C_OK}${G_BOXON}${C_0} " || box="${G_BOXOFF} "; }
+        [[ ${dis[i]} == *d* ]] && style="$C_DIM"
+        if (( i == cur )); then line="  ${C_OK}${G_PTR}${C_0} ${box}${C_B}${style}${num}${lab[i]}${C_0}"
+        else line="    ${box}${C_DIM}${num}${lab[i]}${C_0}"; fi
+        if [ -n "${hin[i]}" ]; then   # one screen row per item, or clicks land on the wrong row
+          local h="${hin[i]}" room=$(( COLS - labw - 14 ))
+          h="${h/#$HOME/\~}"
+          (( room < 8 )) && h="" || { (( ${#h} > room )) && h="${G_ELL}${h: -$((room - 1))}"; }
+          line+="   ${C_DIM}${h}${C_0}"
+        fi
+        FRAME+=("$line"); rowof[r]=$i; r=$((r + 1))
+      done
+      FRAME+=("")
+      if [ -n "$note" ]; then FRAME+=("  ${C_WARN}${note}${C_0}")
+      elif [ "$multi" = 1 ]; then FRAME+=("  ${C_DIM}${G_UPDN}/jk move ${G_DOTS} space or click toggle ${G_DOTS} a all ${G_DOTS} ${G_ENTER} confirm ${G_DOTS} q cancel${C_0}")
+      else FRAME+=("  ${C_DIM}${G_UPDN}/jk move ${G_DOTS} ${G_ENTER} or click select ${G_DOTS} 1-$(( n < 9 ? n : 9 )) jump ${G_DOTS} q back${C_0}"); fi
+      _frame_flush
+      dirty=0; note=""
+    fi
+    _read_key 1 || { [ "$KEY" = timeout ] && continue; return 1; }
+    dirty=1
     case "$KEY" in
       up|char:k|char:K) (( cur > 0 )) && cur=$((cur - 1)) || cur=$((n - 1)) ;;
       down|char:j|char:J) (( cur < n - 1 )) && cur=$((cur + 1)) || cur=0 ;;
       home) cur=0 ;; end) cur=$((n - 1)) ;;
       pgup) cur=$(( cur - 5 < 0 ? 0 : cur - 5 )) ;; pgdn) cur=$(( cur + 5 >= n ? n - 1 : cur + 5 )) ;;
-      esc|char:q|char:Q) _raw_off; return 1 ;;
+      esc|char:q|char:Q) return 1 ;;
       space) [ "$multi" = 1 ] && [[ ${dis[cur]} != *d* ]] && sel[cur]=$(( 1 - sel[cur] )) ;;
       char:a|char:A) if [ "$multi" = 1 ]; then local any=0; for ((i = 0; i < n; i++)); do [[ ${dis[i]} != *d* && ${sel[i]} = 0 ]] && any=1; done
                        for ((i = 0; i < n; i++)); do [[ ${dis[i]} != *d* ]] && sel[i]=$any; done; fi ;;
       digit:*) local d="${KEY#digit:}"; if (( d >= 1 && d <= n )); then cur=$((d - 1))
                  if [ "$multi" = 1 ]; then [[ ${dis[cur]} != *d* ]] && sel[cur]=$(( 1 - sel[cur] ))
-                 elif [[ ${dis[cur]} != *d* ]]; then MENU_IDX=$cur; _raw_off; return 0; else note="${lab[cur]}: not available"; fi; fi ;;
+                 elif [[ ${dis[cur]} != *d* ]]; then MENU_IDX=$cur; return 0; else note="${lab[cur]}: not available"; fi; fi ;;
       enter)
         if [ "$multi" = 1 ]; then
           MENU_SEL=(); for ((i = 0; i < n; i++)); do [ "${sel[i]}" = 1 ] && MENU_SEL+=("$i"); done
           if [ "${#MENU_SEL[@]}" -eq 0 ] && [[ ${dis[cur]} != *d* ]]; then MENU_SEL=("$cur"); fi
-          [ "${#MENU_SEL[@]}" -gt 0 ] && { _raw_off; return 0; }; note="Nothing selected"
+          [ "${#MENU_SEL[@]}" -gt 0 ] && return 0; note="Nothing selected"
         elif [[ ${dis[cur]} == *d* ]]; then note="${lab[cur]}: ${hin[cur]:-not available}"
-        else MENU_IDX=$cur; _raw_off; return 0; fi ;;
+        else MENU_IDX=$cur; return 0; fi ;;
       mouse:*)
-        local m kind b x y
+        local m kind b x y hit
         m="${KEY#mouse:}"; kind="${m: -1}"; m="${m%?}"; IFS=';' read -r b x y <<<"$m"
-        if [ "$kind" = M ]; then
-          case "$b" in
-            64) (( cur > 0 )) && cur=$((cur - 1)) ;;
-            65) (( cur < n - 1 )) && cur=$((cur + 1)) ;;
-            0) local hit="${rowof[y]:-}"
-               if [ -n "$hit" ]; then cur=$hit
-                 if [ "$multi" = 1 ]; then [[ ${dis[cur]} != *d* ]] && sel[cur]=$(( 1 - sel[cur] ))
-                 elif [[ ${dis[cur]} != *d* ]]; then MENU_IDX=$cur; _raw_off; return 0
-                 else note="${lab[cur]}: ${hin[cur]:-not available}"; fi
-               fi ;;
-          esac
-        fi ;;
+        hit="${rowof[y]:-}"
+        if (( b == 64 )); then (( cur > 0 )) && cur=$((cur - 1))
+        elif (( b == 65 )); then (( cur < n - 1 )) && cur=$((cur + 1))
+        elif (( b & 32 )); then                                 # motion (35) or drag (32): hover
+          if [ -n "$hit" ] && [ "$hit" != "$cur" ]; then cur=$hit; else dirty=0; fi
+        elif (( (b & 3) == 0 )) && [ "$kind" = M ]; then        # left press: highlight, remember
+          pressed="${hit:--1}"; [ -n "$hit" ] && cur=$hit || dirty=0
+        elif (( (b & 3) == 0 )) && [ "$kind" = m ]; then        # left release on the pressed row: choose
+          if [ -n "$hit" ] && { [ "$hit" = "$pressed" ] || [ "$pressed" = -1 ]; }; then
+            cur=$hit; pressed=-1
+            if [[ ${dis[cur]} == *d* ]]; then note="${lab[cur]}: ${hin[cur]:-not available}"
+            elif [ "$multi" = 1 ]; then sel[cur]=$(( 1 - sel[cur] ))
+            else MENU_IDX=$cur; return 0; fi
+          else pressed=-1; dirty=0; fi
+        else dirty=0; fi ;;
+      *) dirty=0 ;;
     esac
   done
 }
@@ -496,13 +549,14 @@ _menu_fallback() { # numbered prompt on a basic terminal; nothing at all without
 ask_yn() { # question default(y|n) -> 0 yes
   local q="$1" d="${2:-n}" a
   [ "$ASSUME_YES" = 1 ] && return 0
+  [ "$RAW_ON" = 1 ] && _raw_off
   if [ "$TTY_OK" = 1 ]; then printf '  %s %s ' "$q" "$([ "$d" = y ] && echo '[Y/n]' || echo '[y/N]')" >&"$TTY"; IFS= read -r a <&"$TTY" || a=""
   elif [ -t 0 ]; then read -rp "  $q [y/N] " a || a=""
   else [ "$d" = y ]; return $?; fi
   [ -z "$a" ] && a="$d"; [[ $a == [yY]* ]]
 }
 ask_text() { # prompt default -> REPLY_TEXT
-  local a; REPLY_TEXT="$2"
+  local a; REPLY_TEXT="$2"; [ "$RAW_ON" = 1 ] && _raw_off
   if [ "$TTY_OK" = 1 ]; then printf '  %s [%s]: ' "$1" "$2" >&"$TTY"; IFS= read -r a <&"$TTY" || a=""
   elif [ -t 0 ]; then read -rp "  $1 [$2]: " a || a=""; fi
   [ -n "$a" ] && REPLY_TEXT="$a"; return 0
@@ -1226,18 +1280,17 @@ action_diagnostics() {
   diag_table
   if [ "$TTY_OK" != 1 ] || [ "${OPT_ONCE:-0}" = 1 ]; then print_header; printf '%s\n' "${DLINES[@]}"; _diag_extra; return 0; fi
   _raw_on
+  local redraw=1
   while :; do
-    _tty_size; header_lines "$COLS"
-    local buf=$'\033[H' l
-    for l in "${HDR[@]}"; do buf+="$l"$'\033[K\n'; done
-    buf+=$'\033[K\n'"  ${C_B}Diagnostics${C_0}  ${C_DIM}$(printf '%(%H:%M:%S)T' -1)${C_0}"$'\033[K\n\033[K\n'
-    for l in "${DLINES[@]}"; do buf+="$l"$'\033[K\n'; done
-    buf+=$'\033[K\n'"  ${C_DIM}r refresh ${G_DOTS} l logs ${G_DOTS} q exit${C_0}"$'\033[K\n\033[J'
-    printf '%s' "$buf" >&"$TTY"
+    if [ "$redraw" = 1 ]; then
+      _tty_size; header_lines "$COLS"
+      FRAME=("${HDR[@]}" "" "  ${C_B}Diagnostics${C_0}  ${C_DIM}$(printf '%(%H:%M:%S)T' -1)${C_0}" "" "${DLINES[@]}" "" "  ${C_DIM}r refresh ${G_DOTS} l logs ${G_DOTS} q exit${C_0}")
+      _frame_flush; redraw=0
+    fi
     _read_key || break
     case "$KEY" in
-      char:r|char:R) diag_rows; diag_table ;;
-      char:l|char:L) _show_logs ;;
+      char:r|char:R) diag_rows; diag_table; redraw=1 ;;
+      char:l|char:L) _show_logs; PREV=(); redraw=1 ;;
       char:q|char:Q|esc|enter) break ;;
     esac
   done
@@ -1253,11 +1306,12 @@ _show_logs() {
   for f in "$RUN_DIR"/*@"$HOST".log; do logs+=("$f"); items+=("$(basename "$f" .log)"$'\t'"$(du -h "$f" | cut -f1)"$'\t'); done
   [ "${#logs[@]}" -gt 0 ] || return 0
   menu_pick "Show which log?" "last 40 lines" 0 0 "${items[@]}" || { _raw_on; return 0; }
-  _raw_on
-  local buf=$'\033[H\033[J'"  ${C_B}$(basename "${logs[MENU_IDX]}")${C_0}  ${C_DIM}(any key to go back)${C_0}"$'\n\n'
-  _tty_size
-  while IFS= read -r f; do buf+="  ${f:0:$((COLS - 3))}"$'\n'; done < <(tail -n $((ROWS - 4)) "${logs[MENU_IDX]}" | _strip)
-  printf '%s' "$buf" >&"$TTY"; _read_key
+  _raw_on; _tty_size
+  FRAME=("  ${C_B}$(basename "${logs[MENU_IDX]}")${C_0}  ${C_DIM}(any key or click to go back)${C_0}" "")
+  while IFS= read -r f; do FRAME+=("  ${f:0:$((COLS - 3))}"); done < <(tail -n $((ROWS - 4)) "${logs[MENU_IDX]}" | _strip)
+  _frame_flush
+  # mouse motion and button presses are not "a key"; a release (end of a click) is
+  while _read_key; do [[ $KEY == mouse:* && $KEY != *m ]] && continue; break; done
 }
 
 # ---- Logs --------------------------------------------------------------------
