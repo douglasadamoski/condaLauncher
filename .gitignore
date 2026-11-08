@@ -1,0 +1,17 @@
+# Runtime state of any tool or of the demo (pids, logs, reports)
+run/
+**/run/
+**/deploy/launcher.local
+*.bak
+
+# Machine-specific and session material. Kept beside the repo on the lab share,
+# never published: it names hosts, users, paths and addresses.
+/local/
+/research/
+/session_archive/
+/docs/preferences.html
+/AGENTS.md
+/HANDOFF.md
+/CLAUDE.md
+/.opencode/
+/.claude/
