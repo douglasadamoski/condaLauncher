@@ -151,6 +151,24 @@ The text between `# >>> condaLauncher config >>>` and `# <<< condaLauncher confi
 is kept, and everything else is replaced. The result is syntax-checked before it replaces
 the old file, and a `.bak` copy is left.
 
+## Logo
+
+The logo comes from, in this order:
+1. `logo.txt` beside the launcher
+2. `CL_LOGO` in the config block
+3. `CL_LOGO_TEXT` drawn in the built-in block font
+
+The logo should be plain text, 4–7 lines and at most about 70 columns, using only
+single-width characters. Each line is coloured with the theme's vertical gradient. Within
+a line, colour markup picks theme colours for parts of it: `{r}` red, `{g}` green, `{b}`
+blue, `{y}` yellow, `{m}` magenta, `{c}` cyan, `{d}` dim, `{B}` bold, and `{/}` returns to
+the gradient. Widths are measured without the markup, and without colour the markup is
+dropped. Example (from the qPCR launcher):
+
+```
+██║▄▄ ██║ ...  {d}╌╌╌╌╌╌{r}█{d}╌╌╌╌{g}▄▀{d}╌╌╌{b}▄▄▀{d}╌╌╌╌╌╌╌ Ct{/}
+```
+
 ## Look
 
 Tokyo Night theme: Night on dark terminals, Day on light ones, detected by asking the

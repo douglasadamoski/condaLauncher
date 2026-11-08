@@ -45,7 +45,7 @@ Try it on the bundled demo (needs any conda env with python):
 
 ```bash
 cd v0.1/examples/demo-tool && ./launch-demo.sh
-bash v0.1/tests/run_all.sh          # 36 end-to-end tests
+bash v0.1/tests/run_all.sh          # 38 end-to-end tests
 ```
 
 ## Layout

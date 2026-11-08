@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.2 (2026-11-08)
+
+- Logo colour markup: `{r} {g} {b} {y} {m} {c} {d} {B}` pick theme colours inside a logo
+  line, and `{/}` returns to the gradient. Widths ignore the markup, and it is removed
+  when colour is off. See docs/USAGE.md, section "Logo".
+
 ## v0.1.1 (2026-11-08)
 
 Mouse and drawing fixes after the first test in MobaXterm, where a click had to be made

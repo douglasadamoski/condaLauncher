@@ -33,7 +33,7 @@ CL_STOP_TIMEOUT=5
 
 # =============================== ENGINE =====================================
 # Do not edit below this line in a tool's launcher: `upgrade` replaces it.
-CL_LAUNCHER_VERSION="0.1.1"
+CL_LAUNCHER_VERSION="0.1.2"
 
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
@@ -272,7 +272,20 @@ load_logo() {
   else render_block_text "${CL_LOGO_TEXT:-${CL_TOOL_SHORT:-${CL_TOOL_NAME:-condaLauncher}}}"; fi
   # drop trailing blank lines
   while [ "${#LOGO_LINES[@]}" -gt 0 ] && [[ -z ${LOGO_LINES[-1]//[[:space:]]/} ]]; do unset 'LOGO_LINES[-1]'; done
-  LOGO_W=0; local l; for l in "${LOGO_LINES[@]}"; do (( ${#l} > LOGO_W )) && LOGO_W=${#l}; done
+  LOGO_W=0; local l; for l in "${LOGO_LINES[@]}"; do l="$(_logo_plain "$l")"; (( ${#l} > LOGO_W )) && LOGO_W=${#l}; done
+}
+# Logo colour markup: {r} {g} {b} {y} {m} {c} {d} pick a theme colour (red, green, blue,
+# yellow, magenta, cyan, dim), {B} bold, {/} back to the line's gradient colour.
+# Widths are measured without it; without colour it is simply removed.
+LOGO_TOKENS=(r g b y m c d B /)
+_logo_plain() { local l="$1" t; for t in "${LOGO_TOKENS[@]}"; do l="${l//"{$t}"/}"; done; printf '%s' "$l"; }
+_logo_paint() { # line base-colour -> coloured line
+  local l="$1" base="$2"
+  [ "$COLOR" = 1 ] || { _logo_plain "$l"; return; }
+  l="${l//"{r}"/$C_ERR}"; l="${l//"{g}"/$C_OK}"; l="${l//"{b}"/$C_LINK}"; l="${l//"{y}"/$C_WARN}"
+  l="${l//"{m}"/$C_ACC}"; l="${l//"{c}"/$C_ACC2}"; l="${l//"{d}"/$C_0$C_DIM}"; l="${l//"{B}"/$C_B}"
+  l="${l//"{/}"/$C_0$C_B$base}"
+  printf '%s' "$l"
 }
 _grad() { # i n -> colour escape for logo line i of n (vertical gradient)
   [ "$COLOR" = 1 ] || return 0
@@ -291,7 +304,7 @@ header_lines() { # width -> HDR array
   HDR=()
   n=${#LOGO_LINES[@]}
   if (( LOGO_W > 0 && LOGO_W + 2 <= width )); then
-    for ((i = 0; i < n; i++)); do HDR+=("  $(_grad "$i" "$n")${C_B}${LOGO_LINES[i]}${C_0}"); done
+    local g; for ((i = 0; i < n; i++)); do g="$(_grad "$i" "$n")"; HDR+=("  ${g}${C_B}$(_logo_paint "${LOGO_LINES[i]}" "$g")${C_0}"); done
   else
     HDR+=("  ${C_REV}${C_B} ${CL_TOOL_SHORT:-${CL_TOOL_NAME:-condaLauncher}} ${C_0}")
   fi
