@@ -23,6 +23,7 @@ condaLauncher starts any command that serves HTTP on a port. A tool qualifies wh
 | `CL_VDIR` | absolute path of the version folder |
 | `CL_ENV_PREFIX` | the conda env in use |
 | `CL_TOOL`, `CL_HOST` | tool name, short host name |
+| `CL_POOL` | `1` in a pool worker (`start --workers N`), `0` otherwise |
 
 Other `version.env` keys are available to the `cl_tool_env()` hook as `V_<KEY>`. Use the
 hook when the tool already reads its own variable names:
@@ -33,6 +34,22 @@ cl_tool_env() {
   export TMPDIR="$CL_VDIR/data/tmp"; mkdir -p "$TMPDIR"
 }
 ```
+
+## Running as one of several workers
+
+`start --workers N` (N >= 2) starts N copies of the tool on loopback ports (first free ports from
+PORT+10, in `CL_PORT`) and a proxy on the public port. The proxy sticks each browser to one worker
+by cookie, and sends a new browser to the worker with the fewest open requests. For a tool that
+blocks while it works (a Shiny app exporting a file), this keeps everyone else responsive.
+
+To opt in, set `CL_WORKERS_MAX` (and optionally `CL_WORKERS_DEFAULT`) in the launcher config block; the menu then asks how many workers.
+What the tool must do:
+- Serve a normal page at `CL_HEALTH_PATH` on `CL_PORT` and bind to `CL_BIND` (always 127.0.0.1 for a worker).
+- **Not share scratch space between workers.** When `CL_POOL=1`, put temp files in a folder named after
+  `CL_PORT` (`$CL_VDIR/data/tmp/w$CL_PORT`), or two workers will delete each other's files.
+- Keep a session on one process: no state shared between workers except files it writes itself.
+- Build links to itself from the browser's address, not from a fixed port (the public port differs
+  from the worker's).
 
 ## Showing the dev banner
 

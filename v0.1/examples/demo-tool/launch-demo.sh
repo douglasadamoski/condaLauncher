@@ -27,13 +27,14 @@ CL_ENV_NAME=""
 CL_REQUIRE_PY="json http.server argparse"
 CL_REQUIRE_FILES=""
 CL_REQUIRE_CMDS=""
+CL_WORKERS_MAX=4
 CL_START_TIMEOUT=20
 CL_STOP_TIMEOUT=5
 # <<< condaLauncher config <<<
 
 # =============================== ENGINE =====================================
 # Do not edit below this line in a tool's launcher: `upgrade` replaces it.
-CL_LAUNCHER_VERSION="0.1.3"
+CL_LAUNCHER_VERSION="0.1.4"
 
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
@@ -62,6 +63,12 @@ NOW_EPOCH() { printf '%(%s)T' -1; }
 : "${CL_REQUIRE_PY:=}"
 : "${CL_REQUIRE_FILES:=}"
 : "${CL_REQUIRE_CMDS:=}"
+: "${CL_WORKERS_MAX:=0}"           # most workers the tool supports; 0 = the tool does not support pool mode
+: "${CL_WORKERS_DEFAULT:=0}"       # workers when nobody chooses (0 or 1 = one plain process)
+: "${CL_POOL_PROXY:=caddy}"        # proxy for "start --workers N" (must be in the env)
+: "${CL_POOL_COOKIE:=clw}"         # stickiness cookie name
+: "${CL_POOL_TIMEOUT:=30m}"        # proxy read/write timeout: a long request keeps its connection
+: "${CL_POOL_MAX_BODY:=2GB}"       # largest request body the proxy accepts (uploads)
 : "${CL_START_TIMEOUT:=60}"
 : "${CL_STOP_TIMEOUT:=10}"
 : "${CL_VERSION_ENV:=deploy/version.env}"
@@ -760,6 +767,7 @@ for (s in a) {
 }
 REOF
 MISSING_PKGS=()
+MISSING_CMDS=()
 check_packages() { # prefix ; emits PASS/FAIL steps
   local pre="$1" tmp st name a b c
   MISSING_PKGS=()
@@ -791,13 +799,15 @@ check_packages() { # prefix ; emits PASS/FAIL steps
   rm -f "$tmp"
 }
 offer_install() { # prefix
-  [ "${#MISSING_PKGS[@]}" -gt 0 ] || return 0
+  [ "${#MISSING_PKGS[@]}" -gt 0 ] || [ "${#MISSING_CMDS[@]}" -gt 0 ] || return 0
   find_frontend || return 0
   if is_shared_env "$1"; then hint "$(basename "$1") is listed as shared in site.env: install by hand if you are sure."; return 0; fi
   # installing changes an env other tools may share: only on an explicit --install,
   # or a y typed at the terminal. --yes alone never installs anything.
+  # Missing language packages get the r- prefix for R; missing commands are conda packages as named.
   local -a cp=(); local p
   for p in "${MISSING_PKGS[@]}"; do if [ -n "$CL_REQUIRE_R" ]; then cp+=("r-${p,,}"); else cp+=("$p"); fi; done
+  for p in "${MISSING_CMDS[@]}"; do cp+=("$p"); done
   if [ "${OPT_INSTALL:-0}" != 1 ]; then
     [ "$TTY_OK" = 1 ] || { hint "to install them: re-run with --install, or run the fix lines above"; return 0; }
     out ""
@@ -942,11 +952,32 @@ run_checks() { # mode: preflight|start
   if [ -x "$INTERP" ]; then pass "interpreter" "$INTERP"
   else fail "interpreter" "no $CL_INTERPRETER in $ENV_PREFIX" "pick another env, or: ${FE:-mamba} install -p $ENV_PREFIX ${CL_INTERPRETER/Rscript/r-base}"; fi
   check_packages "$ENV_PREFIX"
+  MISSING_CMDS=()
+  local cpkg
   for c in $CL_REQUIRE_CMDS; do
+    cpkg="${c#*=}"; c="${c%%=*}"      # "cmd" or "cmd=condapackage" (when the names differ)
     step_begin
     if PATH="$ENV_PREFIX/bin:$PATH" type -P "$c" >/dev/null 2>&1; then pass "command $c" "$(PATH="$ENV_PREFIX/bin:$PATH" type -P "$c")"
-    else fail "command $c" "not found in the env or on PATH" "${FE:-mamba} install -p $ENV_PREFIX -c conda-forge $c"; fi
+    else MISSING_CMDS+=("$cpkg"); fail "command $c" "not found in the env or on PATH" "${FE:-mamba} install -p $ENV_PREFIX -c conda-forge $cpkg"; fi
   done
+  # --workers, else the menu's answer, else WORKERS= in version.env, else the tool's default
+  POOL_N="${OPT_WORKERS:-${CHOSEN_WORKERS:-${V_WORKERS:-$CL_WORKERS_DEFAULT}}}"
+  if ! [[ $POOL_N =~ ^[0-9]+$ ]]; then
+    step_begin; fail "workers" "'$POOL_N' is not a number" "use --workers N, or WORKERS=N in $CL_VERSION_ENV"; POOL_N=0
+  elif [ "$POOL_N" -ge 2 ] && [ "$CL_WORKERS_MAX" -lt 2 ]; then
+    step_begin; fail "workers" "$CL_TOOL_NAME has not declared support for workers (CL_WORKERS_MAX is 0)" "run it as one process: --workers 1; a tool author sets CL_WORKERS_MAX after checking TOOL_CONTRACT.md"; POOL_N=0
+  elif [ "$POOL_N" -ge 2 ] && [ "$POOL_N" -gt "$CL_WORKERS_MAX" ]; then
+    step_begin; fail "workers" "$POOL_N asked, this tool allows at most $CL_WORKERS_MAX" "use --workers $CL_WORKERS_MAX or fewer"; POOL_N=0
+  elif [ "$POOL_N" -eq 1 ]; then
+    step_begin; warn "workers" "a pool of 1 is the same as one process: starting one process"; POOL_N=0
+  elif [ "$POOL_N" -ge 2 ]; then
+    step_begin
+    if PATH="$ENV_PREFIX/bin:$PATH" type -P "$CL_POOL_PROXY" >/dev/null 2>&1; then pass "pool proxy $CL_POOL_PROXY" "$POOL_N workers; $(PATH="$ENV_PREFIX/bin:$PATH" type -P "$CL_POOL_PROXY")"
+    else
+      [[ " ${MISSING_CMDS[*]} " == *" $CL_POOL_PROXY "* ]] || MISSING_CMDS+=("$CL_POOL_PROXY")
+      fail "pool proxy $CL_POOL_PROXY" "needed for $POOL_N workers: not found in the env or on PATH" "${FE:-mamba} install -p $ENV_PREFIX -c conda-forge $CL_POOL_PROXY"
+    fi
+  fi
 
   section "Files" "inside $VNAME/"
   for f in $CL_REQUIRE_FILES ${CL_ENTRY}; do
@@ -980,6 +1011,140 @@ run_checks() { # mode: preflight|start
   step_begin
   if [ "$BIND" = 0.0.0.0 ]; then warn "bind $BIND" "whole network, no login: anyone on the LAN can open it" "this machine only: --local"
   else pass "bind $BIND"; fi
+}
+
+# ---- Pool: N workers behind a proxy ------------------------------------------
+# The environment every server process gets. Runs inside a subshell: port bind pool(0|1).
+_server_env() {
+  export PATH="$ENV_PREFIX/bin:$PATH" CONDA_PREFIX="$ENV_PREFIX"
+  export LANG="${LANG:-C.UTF-8}"; case "${LANG}" in *[Uu][Tt][Ff]*) ;; *) export LANG=C.UTF-8 ;; esac
+  [ -d "$ENV_PREFIX/lib/jvm" ] && export JAVA_HOME="$ENV_PREFIX/lib/jvm"
+  [ -d "$ENV_PREFIX/share/gdal" ] && export GDAL_DATA="$ENV_PREFIX/share/gdal"
+  [ -d "$ENV_PREFIX/share/proj" ] && export PROJ_DATA="$ENV_PREFIX/share/proj" PROJ_LIB="$ENV_PREFIX/share/proj"
+  [ -d "$ENV_PREFIX/share/glib-2.0/schemas" ] && export GSETTINGS_SCHEMA_DIR="$ENV_PREFIX/share/glib-2.0/schemas"
+  export CL_BANNER="$BANNER" CL_ROLE="${V_ROLE:-}" CL_VERSION="$VNAME" CL_PORT="$1" CL_BIND="$2" CL_POOL="$3" \
+         CL_VDIR="$VDIR" CL_ENV_PREFIX="$ENV_PREFIX" CL_TOOL="$CL_TOOL_NAME" CL_HOST="$HOST"
+}
+# Start one detached process and write its state file. Sets LAUNCH_PID.
+#   _spawn STATEFILE LOG PORT BIND ROLE POOL(0|1) TOOLENV(0|1) cmd...
+# Extra lines for the state file go in SPAWN_EXTRA (array).
+_spawn() {
+  local sf="$1" log="$2" port="$3" bind="$4" role="$5" pool="$6" tenv="$7"; shift 7
+  local pidf; pidf="$RUN_DIR/.$(basename "$sf" .state).pid"
+  rotate_log "$log"; : > "$log"; _mode "$log"; rm -f "$pidf"
+  (
+    cd "$VDIR" || exit 1
+    [ -n "${LOCK_FD:-}" ] && exec {LOCK_FD}>&-
+    [ -n "$TTY" ] && exec {TTY}>&-
+    [ -n "$SLEEP_FD" ] && [ "$SLEEP_FD" -ge 0 ] 2>/dev/null && exec {SLEEP_FD}>&-
+    _server_env "$port" "$bind" "$pool"
+    if [ "$tenv" = 1 ] && declare -F cl_tool_env >/dev/null; then cl_tool_env || exit 1; fi
+    echo "=== $(date '+%F %T') condaLauncher start $VNAME ($role) port $port: $*" >>"$log"
+    exec setsid -f bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pidf" "$@" >>"$log" 2>&1 </dev/null
+  )
+  local i pid=""
+  for ((i = 0; i < 50; i++)); do [ -s "$pidf" ] && { pid="$(<"$pidf")"; break; }; _nap 0.1; done
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  rm -f "$pidf"; LAUNCH_PID="$pid"
+  { echo "pid=$pid"; echo "starttime=$(_starttime "$pid")"; echo "host=$HOST"; echo "user=$(id -un)"; echo "version=$VNAME"
+    echo "port=$port"; echo "bind=$bind"; echo "env=$ENV_PREFIX"; echo "banner=$BANNER"; echo "role=$role"
+    echo "started=$(NOW_EPOCH)"; echo "log=$log"; echo "cmd=$*"
+    local x; for x in "${SPAWN_EXTRA[@]}"; do echo "$x"; done; } > "$sf"; _mode "$sf"
+}
+# The proxy's configuration, regenerated at every start. file, then the workers' ports.
+pool_caddyfile() {
+  local f="$1"; shift; local ups="" p
+  for p in "$@"; do ups+=" 127.0.0.1:$p"; done
+  {
+    echo "# written by condaLauncher at every start of $VNAME: change the launcher settings, not this file"
+    echo "{"; echo "    admin off"; echo "    auto_https off"; echo "}"
+    echo ":$PORT {"
+    echo "    bind $BIND"
+    echo "    encode gzip"
+    echo "    request_body {"; echo "        max_size $CL_POOL_MAX_BODY"; echo "    }"
+    echo "    reverse_proxy$ups {"
+    echo "        # sticky by cookie, not by IP (a lab can share one NAT address); a new browser goes to the"
+    echo "        # worker with the fewest open requests, so one busy with a long request is avoided."
+    echo "        # Passive health only: an active check would reroute the users of a busy worker."
+    echo "        lb_policy cookie $CL_POOL_COOKIE {"; echo "            fallback least_conn"; echo "        }"
+    echo "        lb_try_duration 5s"; echo "        fail_duration 15s"; echo "        max_fails 3"
+    echo "        transport http {"
+    echo "            read_timeout $CL_POOL_TIMEOUT"; echo "            write_timeout $CL_POOL_TIMEOUT"; echo "            dial_timeout 10s"
+    echo "        }"
+    echo "        header_up X-Real-IP {remote_host}"
+    echo "    }"
+    echo "}"
+  } > "$f"; _mode "$f"
+}
+pool_abort() { local f; for f in "$@"; do [ -e "$f" ] && stop_one "$f"; done; }
+# After run_checks: start POOL_N workers, wait until all answer, then the proxy on PORT.
+# Sets POOL_LOG, POOL_WPORTS.
+pool_launch() {
+  local n="$POOL_N" i p wp pbin cf a
+  local -a wports=() wsf=() cmd=()
+  section "Launch" "pool of $n workers behind $CL_POOL_PROXY; detached, keeps running after this window closes"
+  p=$((PORT + 10))
+  for ((i = 1; i <= n; i++)); do
+    while port_busy "$p" || port_claimed "$p" ""; do p=$((p + 1)); done
+    wports+=("$p"); p=$((p + 1))
+  done
+  POOL_WPORTS="${wports[*]}"
+  cf="$RUN_DIR/$VNAME@$HOST.Caddyfile"
+  step_begin; pool_caddyfile "$cf" "${wports[@]}"; pass "proxy configuration" "${cf#$TOOL_ROOT/}"
+  local sp="$PORT" sb="$BIND" wf
+  for ((i = 0; i < n; i++)); do
+    wp="${wports[i]}"; PORT="$wp"; BIND=127.0.0.1; cmd=(); for a in "${CL_CMD[@]}"; do cmd+=("$(subst "$a")"); done; PORT="$sp"; BIND="$sb"
+    wf="$RUN_DIR/$VNAME~w$((i + 1))@$HOST.state"
+    step_begin; SPAWN_EXTRA=()
+    if _spawn "$wf" "$RUN_DIR/$VNAME~w$((i + 1))@$HOST.log" "$wp" 127.0.0.1 worker 1 1 "${cmd[@]}"; then
+      wsf+=("$wf"); pass "worker $((i + 1))" "pid $LAUNCH_PID on 127.0.0.1:$wp"
+    else fail "worker $((i + 1))" "the process did not start" "read ${RUN_DIR#$TOOL_ROOT/}/$VNAME~w$((i + 1))@$HOST.log"; pool_abort "${wsf[@]}"; return 1; fi
+  done
+  step_begin
+  local t0 limit code allok spin=0; t0="$(NOW_EPOCH)"; limit="${OPT_TIMEOUT:-$CL_START_TIMEOUT}"
+  [ "$TTY_OK" = 1 ] && printf '\033[?25l' >&"$TTY"
+  while :; do
+    allok=1
+    for ((i = 0; i < n; i++)); do
+      read_state "${wsf[i]}"
+      if ! kill -0 "${ST_pid:-0}" 2>/dev/null; then
+        [ "$TTY_OK" = 1 ] && printf '\r\033[K\033[?25h' >&"$TTY"
+        fail "worker $((i + 1))" "exited during startup" "read the log: ${RUN_DIR#$TOOL_ROOT/}/$VNAME~w$((i + 1))@$HOST.log"; pool_abort "${wsf[@]}"; return 1
+      fi
+      code="$(http_code 127.0.0.1 "${wports[i]}" "$CL_HEALTH_PATH")"; [[ $code =~ ^[23] ]] || allok=0
+    done
+    [ "$allok" = 1 ] && break
+    if (( $(NOW_EPOCH) - t0 >= limit )); then
+      [ "$TTY_OK" = 1 ] && printf '\r\033[K\033[?25h' >&"$TTY"
+      fail "workers" "not all $n answered within ${limit} s" "raise CL_START_TIMEOUT, or read the worker logs in ${RUN_DIR#$TOOL_ROOT/}/"; pool_abort "${wsf[@]}"; return 1
+    fi
+    if [ "$TTY_OK" = 1 ]; then printf '\r\033[K  %s%s%s waiting for %d workers %s%ds / %ds%s' "$C_ACC" "${G_SPIN[spin % ${#G_SPIN[@]}]}" "$C_0" "$n" "$C_DIM" $(( $(NOW_EPOCH) - t0 )) "$limit" "$C_0" >&"$TTY"; fi
+    spin=$((spin + 1)); _nap 0.5
+  done
+  [ "$TTY_OK" = 1 ] && printf '\r\033[K\033[?25h' >&"$TTY"
+  pass "all $n workers answer" "after $(( $(NOW_EPOCH) - t0 )) s"
+  pbin="$(PATH="$ENV_PREFIX/bin:$PATH" type -P "$CL_POOL_PROXY")"
+  local sf log; sf="$(state_file "$VNAME")"; log="$RUN_DIR/$VNAME@$HOST.log"; POOL_LOG="$log"
+  step_begin; SPAWN_EXTRA=("workers=$n" "worker_ports=${wports[*]}")
+  if ! _spawn "$sf" "$log" "$PORT" "$BIND" "${V_ROLE:-}" 0 0 env "XDG_CONFIG_HOME=$RUN_DIR/proxy-$VNAME" "XDG_DATA_HOME=$RUN_DIR/proxy-$VNAME" "$pbin" run --config "$cf" --adapter caddyfile; then
+    fail "proxy" "the process did not start" "read ${log#$TOOL_ROOT/}"; pool_abort "${wsf[@]}"; return 1
+  fi
+  SPAWN_EXTRA=()
+  pass "proxy" "$CL_POOL_PROXY pid $LAUNCH_PID on $BIND:$PORT"
+  step_begin
+  local ph; ph="$(probe_host "$BIND")"; t0="$(NOW_EPOCH)"; code=000
+  while :; do
+    code="$(http_code "$ph" "$PORT" "$CL_HEALTH_PATH")"; [[ $code =~ ^[23] ]] && break
+    kill -0 "$LAUNCH_PID" 2>/dev/null || break
+    (( $(NOW_EPOCH) - t0 >= 20 )) && break
+    _nap 0.25
+  done
+  if [[ $code =~ ^[23] ]]; then pass "HTTP $code through the proxy on $CL_HEALTH_PATH" "after $(( $(NOW_EPOCH) - t0 )) s"
+  else
+    local -a tl; mapfile -t tl < <(tail -n 10 "$log")
+    fail "proxy" "no answer on $ph:$PORT" "read the log: ${log#$TOOL_ROOT/}" "${tl[@]}"; pool_abort "$sf" "${wsf[@]}"; return 1
+  fi
+  return 0
 }
 
 # ---- Start -------------------------------------------------------------------
@@ -1034,10 +1199,29 @@ choose_banner() { # -> BANNER
   menu_pick "Development banner for $VNAME?" "recommended: $([ "$def" = y ] && echo "yes, ROLE=dev" || echo "no, ROLE=${V_ROLE:-not set}")" "$pre" 0 "${items[@]}" || return 1
   if [ "$MENU_IDX" = 0 ]; then BANNER="$text"; else BANNER=""; fi
 }
+# How many server processes? Only asked when the tool supports workers, at a terminal, and no --workers/--yes.
+CHOSEN_WORKERS=""
+choose_workers() { # -> CHOSEN_WORKERS (unset = take the default)
+  [ "$CL_WORKERS_MAX" -ge 2 ] || return 0
+  [ -z "${OPT_WORKERS:-}" ] || return 0
+  if [ "$TTY_OK" != 1 ] && ! [ -t 0 ] || [ "$ASSUME_YES" = 1 ]; then return 0; fi
+  local def="${V_WORKERS:-$CL_WORKERS_DEFAULT}"; [[ $def =~ ^[0-9]+$ ]] || def=0
+  [ "$def" -gt "$CL_WORKERS_MAX" ] && def="$CL_WORKERS_MAX"
+  local -a items=("One process"$'\t'"a long task, like an export, freezes every other user"$'\t') vals=(1)
+  local n pre=0 i=0
+  for n in 2 3 4 5 6 7 8 9 12 16; do   # rows 1-9 are numbered like their worker counts
+    [ "$n" -le "$CL_WORKERS_MAX" ] || break
+    items+=("$n workers"$'\t'"$n processes behind one port; a long task blocks only the users on its worker"$'\t'); vals+=("$n")
+  done
+  for i in "${!vals[@]}"; do [ "${vals[i]}" -eq "$def" ] || { [ "$def" -eq 0 ] && [ "${vals[i]}" -eq 1 ]; } && { pre=$i; break; }; done
+  menu_pick "How many workers for $VNAME?" "each worker is a full copy of the tool in memory" "$pre" 0 "${items[@]}" || return 1
+  CHOSEN_WORKERS="${vals[MENU_IDX]}"
+}
 action_start() {
   choose_version "Start which version?" || return 1
   choose_env || return 1
   choose_banner || return 1
+  choose_workers || return 1
   [ "$TTY_OK" = 1 ] && _raw_off
   report_begin start "$VNAME"
   print_header
@@ -1048,8 +1232,13 @@ action_start() {
     offer_install "$ENV_PREFIX"
     summary_box "Start $VNAME: NOT started" "${N_FAIL} check(s) failed: ${FAILS[*]}"; _title "${G_FAIL} $CL_TOOL_SHORT: start failed"; return 1
   fi
+  local sf log pidf
+  if [ "${POOL_N:-0}" -ge 2 ]; then
+    pool_launch || { summary_box "Start $VNAME: NOT started"; _title "${G_FAIL} $CL_TOOL_SHORT: start failed"; return 1; }
+    sf="$(state_file "$VNAME")"; log="$POOL_LOG"
+  else
   section "Launch" "detached: keeps running after this window closes"
-  local sf log pidf; sf="$(state_file "$VNAME")"; log="$RUN_DIR/$VNAME@$HOST.log"; pidf="$RUN_DIR/.$VNAME@$HOST.pid"
+  sf="$(state_file "$VNAME")"; log="$RUN_DIR/$VNAME@$HOST.log"; pidf="$RUN_DIR/.$VNAME@$HOST.pid"
   step_begin
   rotate_log "$log"; : > "$log"; _mode "$log"; rm -f "$pidf"
   local -a cmd=(); local a; for a in "${CL_CMD[@]}"; do cmd+=("$(subst "$a")"); done
@@ -1060,14 +1249,7 @@ action_start() {
     [ -n "${LOCK_FD:-}" ] && exec {LOCK_FD}>&-
     [ -n "$TTY" ] && exec {TTY}>&-
     [ -n "$SLEEP_FD" ] && [ "$SLEEP_FD" -ge 0 ] 2>/dev/null && exec {SLEEP_FD}>&-
-    export PATH="$ENV_PREFIX/bin:$PATH" CONDA_PREFIX="$ENV_PREFIX"
-    export LANG="${LANG:-C.UTF-8}"; case "${LANG}" in *[Uu][Tt][Ff]*) ;; *) export LANG=C.UTF-8 ;; esac
-    [ -d "$ENV_PREFIX/lib/jvm" ] && export JAVA_HOME="$ENV_PREFIX/lib/jvm"
-    [ -d "$ENV_PREFIX/share/gdal" ] && export GDAL_DATA="$ENV_PREFIX/share/gdal"
-    [ -d "$ENV_PREFIX/share/proj" ] && export PROJ_DATA="$ENV_PREFIX/share/proj" PROJ_LIB="$ENV_PREFIX/share/proj"
-    [ -d "$ENV_PREFIX/share/glib-2.0/schemas" ] && export GSETTINGS_SCHEMA_DIR="$ENV_PREFIX/share/glib-2.0/schemas"
-    export CL_BANNER="$BANNER" CL_ROLE="${V_ROLE:-}" CL_VERSION="$VNAME" CL_PORT="$PORT" CL_BIND="$BIND" \
-           CL_VDIR="$VDIR" CL_ENV_PREFIX="$ENV_PREFIX" CL_TOOL="$CL_TOOL_NAME" CL_HOST="$HOST"
+    _server_env "$PORT" "$BIND" 0
     if declare -F cl_tool_env >/dev/null; then cl_tool_env || exit 1; fi
     echo "=== $(date '+%F %T') condaLauncher start $VNAME port $PORT: ${cmd[*]}" >>"$log"
     exec setsid -f bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pidf" "${cmd[@]}" >>"$log" 2>&1 </dev/null
@@ -1104,6 +1286,7 @@ action_start() {
     else fail "health" "no answer within ${limit} s (process still running, pid $pid)" "wait and run Diagnostics, or raise CL_START_TIMEOUT" "${tl[@]}"; fi
     summary_box "Start $VNAME: NOT healthy"; _title "${G_FAIL} $CL_TOOL_SHORT: start failed"; return 1
   fi
+  fi
   local sz; sz=$(( $(stat -c %s "$log.1" 2>/dev/null || echo 0) / 1048576 ))
   (( sz >= CL_LOG_WARN_MB )) && { step_begin; warn "previous log" "${sz} MB: the app logs a lot"; }
   summary_box "Start $VNAME" "${C_OK}${G_DOT}${C_0} ${C_B}${CL_TOOL_NAME} ${VNAME}${C_0} ready ${C_DIM}(env $(basename "$ENV_PREFIX"), banner $([ -n "$BANNER" ] && echo ON || echo off))${C_0}"
@@ -1112,6 +1295,7 @@ action_start() {
   local ip first=""
   if [ "$BIND" = 0.0.0.0 ]; then for ip in $(lan_ips); do out "  ${G_ARR}  Network:  $(_link "http://$ip:$PORT/")"; first="${first:-http://$ip:$PORT/}"; done
   elif [ "$BIND" != 127.0.0.1 ]; then out "  ${G_ARR}  Network:  $(_link "http://$BIND:$PORT/")"; first="http://$BIND:$PORT/"; fi
+  [ "${POOL_N:-0}" -ge 2 ] && out "  ${G_ARR}  Pool:     $POOL_N workers on 127.0.0.1 ports ${POOL_WPORTS// /, } behind $CL_POOL_PROXY"
   out "  ${G_ARR}  Logs:     ${log#$TOOL_ROOT/}"
   out "  ${G_ARR}  Stop:     ./$(basename "$SELF") stop --version $VNAME"
   if [ -n "$first" ] && command -v qrencode >/dev/null 2>&1 && [ "$JSON" = 0 ]; then
@@ -1226,7 +1410,13 @@ action_stop() {
   report_begin stop
   print_header
   take_lock || return 1
-  for f in "${chosen[@]}"; do stop_one "$f"; done
+  local -a ordered=(); local -A seen=(); local w
+  for f in "${chosen[@]}"; do
+    [ -n "${seen[$f]:-}" ] && continue
+    ordered+=("$f"); seen[$f]=1; read_state "$f"
+    if [ -n "${ST_workers:-}" ]; then for w in "$RUN_DIR/${ST_version}~w"*"@$HOST.state"; do [ -n "${seen[$w]:-}" ] || { ordered+=("$w"); seen[$w]=1; }; done; fi
+  done
+  for f in "${ordered[@]}"; do stop_one "$f"; done
   summary_box "Stop: ${#chosen[@]} version(s)"
   _report_others "${others[@]}"
   _title "$CL_TOOL_SHORT: stopped"
@@ -1262,6 +1452,14 @@ diag_rows() { # -> DROWS (tab separated) and JSON
     local icon="$G_ODOT"; case "$state" in up) icon="$G_DOT" ;; crashed|broken) icon="$G_FAIL" ;; esac
     DROWS+=("$v"$'\t'"${V_ROLE:--}"$'\t'"$icon $state"$'\t'"$port"$'\t'"$pid"$'\t'"$upt"$'\t'"$health"$'\t'"$env"$'\t'"$ban"$'\t'"$logsz")
     DJSON+=("{\"version\":\"$(_j "$v")\",\"role\":\"$(_j "${V_ROLE:-}")\",\"state\":\"$state\",\"host\":\"$(_j "$HOST")\",\"port\":${port:-null},\"pid\":$([ "$pid" = - ] && echo null || echo "$pid"),\"uptime_s\":$([ "$state" = up ] && echo "$up" || echo null),\"http\":\"$health\",\"env\":\"$(_j "${ST_env:-}")\",\"banner\":\"$(_j "${ST_banner:-}")\"}")
+    if [ "$STATE" = running ] && [ -n "${ST_workers:-}" ]; then
+      local wf wcode
+      for wf in "$RUN_DIR/$v~w"*"@$HOST.state"; do
+        state_status "$wf"; [ "$STATE" = running ] || continue
+        wcode="$(http_code 127.0.0.1 "$ST_port" "$CL_HEALTH_PATH")"
+        DROWS+=("  worker"$'\t'"-"$'\t'"$G_DOT up"$'\t'"$ST_port"$'\t'"$ST_pid"$'\t'"$(_fmt_dur $(( $(NOW_EPOCH) - ${ST_started:-0} )))"$'\t'"$wcode"$'\t'"-"$'\t'"-"$'\t'"-")
+      done
+    fi
     for k in "${!ST_@}"; do unset "$k"; done
   done
   local f
@@ -1375,6 +1573,9 @@ $( [ -n "$CL_DESCRIPTION" ] && printf '%s\n' "$CL_DESCRIPTION" | fold -s -w 76 |
   ${C_B}Without the menu${C_0} (scripts, cron, ssh host cmd)
     $me start [--version V] [--env NAME|PATH] [--banner on|off|TEXT]
               [--port N] [--local] [--timeout S] [--yes]
+              [--workers N]   only for tools that support it: N >= 2 server processes behind a proxy on the
+                              port, so a long request in one cannot freeze the others; 1 = one process.
+                              The menu asks for the number when --workers is not given.
     $me stop  [--version V | --all] [--force] [--yes]
     $me preflight [--version V] [--env E] [--json] [--install]
     $me status [--json]            same as diagnostics, printed once
@@ -1385,6 +1586,7 @@ $( [ -n "$CL_DESCRIPTION" ] && printf '%s\n' "$CL_DESCRIPTION" | fold -s -w 76 |
 
   ${C_B}Files${C_0}
     run/<version>@<host>.state   what is running (pid, port, env, banner)
+    run/<version>~wN@<host>.state, .log   the workers of a pool (--workers)
     run/<version>@<host>.log     server output (last $CL_LOG_KEEP kept)
     run/reports/                 every check report, colour stripped
     <version>/$CL_VERSION_ENV    per-version ROLE, PORT, BANNER, BIND
@@ -1482,7 +1684,9 @@ CL_ENV_LOCK=""                  # e.g. deploy/${envn}.lock.txt (found automatica
 CL_REQUIRE_R=""
 CL_REQUIRE_PY=""
 CL_REQUIRE_FILES=""             # extra files that must exist in a version folder
-CL_REQUIRE_CMDS=""              # commands needed on PATH inside the env (zip, pandoc ...)
+CL_REQUIRE_CMDS=""              # commands needed on PATH inside the env (zip, pandoc ...); "cmd=pkg" if the conda package is named differently; a missing one is offered for install like a package
+CL_WORKERS_MAX=0                # >= 2 if the tool can run as several workers behind one port (see docs/TOOL_CONTRACT.md); adds a menu question and --workers
+CL_WORKERS_DEFAULT=0            # workers when nobody chooses (0 or 1 = one plain process)
 CL_START_TIMEOUT=60
 CL_STOP_TIMEOUT=10
 CL_BANNER_TEMPLATE="DEVELOPMENT {VERSION} — not for real experiments"
@@ -1531,13 +1735,14 @@ main_menu() {
 
 main() {
   local cmd="" ; local -a rest=()
-  OPT_VERSION=""; OPT_INSTALL=0; OPT_ENV=""; OPT_BANNER=""; OPT_PORT=""; OPT_BIND=""; OPT_ALL=0; OPT_FOLLOW=0; OPT_ONCE=0; OPT_TIMEOUT=""
+  OPT_VERSION=""; OPT_INSTALL=0; OPT_ENV=""; OPT_BANNER=""; OPT_PORT=""; OPT_BIND=""; OPT_ALL=0; OPT_FOLLOW=0; OPT_ONCE=0; OPT_TIMEOUT=""; OPT_WORKERS=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --version|-V) [ -n "${2:-}" ] && [[ $2 != -* ]] && { OPT_VERSION="$2"; shift 2; continue; }; echo "condaLauncher $CL_LAUNCHER_VERSION"; return 0 ;;
       --env) OPT_ENV="$2"; shift 2 ;;
       --banner) OPT_BANNER="$2"; shift 2 ;;
       --port) OPT_PORT="$2"; shift 2 ;;
+      --workers) OPT_WORKERS="$2"; shift 2 ;;
       --bind) OPT_BIND="$2"; shift 2 ;;
       --local) OPT_BIND=127.0.0.1; shift ;;
       --timeout) OPT_TIMEOUT="$2"; shift 2 ;;

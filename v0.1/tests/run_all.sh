@@ -2,7 +2,8 @@
 # End-to-end tests for condaLauncher, run against a scratch copy of examples/demo-tool.
 #   bash tests/run_all.sh                 uses the first conda env that has python
 #   CL_TEST_ENV=/path/to/env bash tests/run_all.sh
-# Needs: a conda env with python 3, free ports 18761-18763. Leaves nothing running.
+# Needs: a conda env with python 3, free ports 18761-18763 (and 18771-18780 for the pool tests, which
+# also need caddy on PATH or CL_TEST_CADDY=/path/to/caddy; without it they are skipped). Leaves nothing running.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; V="$(dirname "$HERE")"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cl-test.XXXXXX")"
@@ -92,6 +93,67 @@ echo "-- stop all"
 out="$("$L" stop --all --yes </dev/null 2>&1)"; rc=$?
 [ "$rc" = 0 ] && [ -z "$(http 18761)" ] && ok "stop --all" || bad "stop --all (rc $rc)" "$out"
 [ "$("$L" status --json </dev/null | grep -c '"state":"up"')" = 0 ] && ok "nothing left running" || bad "nothing left running"
+
+echo "-- a missing command is offered for install"
+sed 's/^CL_REQUIRE_CMDS=""/CL_REQUIRE_CMDS="nosuchcmd=nosuchpkg"/' "$L" > "$WORK/launch-cmd.sh"; chmod +x "$WORK/launch-cmd.sh"
+out="$("$WORK/launch-cmd.sh" preflight --version v0.1 --env "$ENVP" </dev/null 2>&1)"; rc=$?
+[ "$rc" = 1 ] && [[ $out == *"command nosuchcmd"* && $out == *"install -p"*"nosuchpkg"* ]] && ok "missing command fails with an install line naming the conda package" || bad "missing command (rc $rc)" "$out"
+[[ $out == *"re-run with --install"* ]] && ok "and points to --install (never installs on its own)" || bad "install offer text" "$out"
+rm -f "$WORK/launch-cmd.sh"
+
+echo "-- workers need the tool's declaration"
+sed 's/^CL_WORKERS_MAX=4$/CL_WORKERS_MAX=0/' "$L" > "$WORK/launch-nowork.sh"; chmod +x "$WORK/launch-nowork.sh"
+out="$("$WORK/launch-nowork.sh" start --version v0.1 --env "$ENVP" --workers 2 --yes </dev/null 2>&1)"; rc=$?
+[ "$rc" = 1 ] && [[ $out == *"has not declared support for workers"* ]] && [ -z "$(http 18761)" ] && ok "a tool without CL_WORKERS_MAX refuses --workers 2 (and starts nothing)" || bad "undeclared workers (rc $rc)" "$out"
+out="$("$WORK/launch-nowork.sh" start --version v0.1 --env "$ENVP" --workers 1 --yes </dev/null 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ok "the same tool still starts with --workers 1" || bad "--workers 1 on an undeclared tool (rc $rc)" "$out"
+"$L" stop --version v0.1 --yes </dev/null >/dev/null 2>&1; rm -f "$WORK/launch-nowork.sh"
+out="$("$L" start --version v0.1 --env "$ENVP" --workers 9 --yes </dev/null 2>&1)"; rc=$?
+[ "$rc" = 1 ] && [[ $out == *"allows at most 4"* ]] && ok "--workers above CL_WORKERS_MAX is refused" || bad "--workers 9 (rc $rc)" "$out"
+
+echo "-- pool: start --workers N"
+CADDY="${CL_TEST_CADDY:-$(command -v caddy || true)}"
+if [ -z "$CADDY" ] || [ ! -x "$CADDY" ]; then echo "  SKIP  no caddy on PATH (set CL_TEST_CADDY=/path/to/caddy to run these)"
+else
+  export PATH="$(dirname "$CADDY"):$PATH"
+  out="$("$L" start --version v0.1 --env "$ENVP" --workers abc --yes </dev/null 2>&1)"; rc=$?
+  [ "$rc" = 1 ] && [[ $out == *"not a number"* ]] && ok "--workers abc is refused" || bad "--workers abc (rc $rc)" "$out"
+  out="$("$L" start --version v0.1 --env "$ENVP" --workers 1 --yes </dev/null 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && [[ $out == *"pool of 1"* ]] && [ -z "$(ls "$WORK"/run/v0.1~w* 2>/dev/null)" ] && ok "--workers 1 warns and runs one plain process" || bad "--workers 1 (rc $rc)" "$out"
+  "$L" stop --version v0.1 --yes </dev/null >/dev/null 2>&1
+  sed 's/^CL_WORKERS_DEFAULT=0$/CL_WORKERS_DEFAULT=2/' "$L" > "$WORK/launch-dflt.sh"; chmod +x "$WORK/launch-dflt.sh"
+  grep -q '^CL_WORKERS_DEFAULT=2$' "$WORK/launch-dflt.sh" || sed -i 's/^CL_WORKERS_MAX=4$/CL_WORKERS_MAX=4\nCL_WORKERS_DEFAULT=2/' "$WORK/launch-dflt.sh"
+  out="$("$WORK/launch-dflt.sh" start --version v0.1 --env "$ENVP" --yes </dev/null 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && [[ $out == *"all 2 workers answer"* ]] && ok "CL_WORKERS_DEFAULT=2 starts a pool with no flag" || bad "default workers (rc $rc)" "$out"
+  "$L" stop --version v0.1 --yes </dev/null >/dev/null 2>&1; rm -f "$WORK/launch-dflt.sh"
+  out="$("$L" start --version v0.1 --env "$ENVP" --workers 3 --yes </dev/null 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && [[ $out == *"all 3 workers answer"* ]] && ok "start --workers 3" || bad "start --workers 3 (rc $rc)" "$out"
+  [[ $(http 18761) == *"Demo tool v0.1"* ]] && ok "the public port answers through the proxy" || bad "public port through the proxy" "$(http 18761)"
+  [ "$(ls "$WORK"/run/v0.1~w*@*.state 2>/dev/null | wc -l)" = 3 ] && ok "three worker records" || bad "three worker records"
+  out="$("$L" status </dev/null)"; [ "$(grep -c ' worker ' <<<"$out")" = 3 ] && ok "status lists the three workers under the version" || bad "status lists workers" "$out"
+  if command -v curl >/dev/null 2>&1; then
+    cks=""; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do rm -f "$WORK/jar$i"; curl -s -o /dev/null -c "$WORK/jar$i" http://127.0.0.1:18761/; cks+="$(awk '$6=="clw"{print $7}' "$WORK/jar$i")"$'\n'; done
+    [ "$(sort -u <<<"$cks" | grep -c .)" -ge 2 ] && ok "fresh browsers are spread over several workers" || bad "spread over workers" "$cks"
+    c1="$(awk '$6=="clw"{print $7}' "$WORK/jar1")"; curl -s -o /dev/null -b "$WORK/jar1" -c "$WORK/jar1" http://127.0.0.1:18761/
+    [ "$(awk '$6=="clw"{print $7}' "$WORK/jar1")" = "$c1" ] && ok "a browser with the cookie stays on its worker" || bad "cookie stickiness"
+    # freeze worker 1 (stands in for a worker busy with a long export), hold one request open on it as the export would
+    wpid="$(sed -n 's/^pid=//p' "$WORK"/run/v0.1~w1@*.state)"
+    kill -STOP -- "-$wpid" 2>/dev/null || kill -STOP "$wpid"
+    held=""; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 -b "$WORK/jar$i" http://127.0.0.1:18761/)" = 000 ] && { held="$i"; break; }; done
+    if [ -z "$held" ]; then bad "no browser was pinned to the frozen worker"
+    else
+      curl -s -o /dev/null --max-time 40 -b "$WORK/jar$held" http://127.0.0.1:18761/ & HOLD_PID=$!
+      sleep 1; n_ok=0
+      for i in 1 2 3 4 5 6 7 8; do rm -f "$WORK/jarn"; code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -c "$WORK/jarn" http://127.0.0.1:18761/)"; [ "$code" = 200 ] && n_ok=$((n_ok + 1)); done
+      [ "$n_ok" = 8 ] && ok "with a worker stuck on a long request, 8 new browsers are all served by the others" || bad "frozen worker: $n_ok/8 served"
+      kill -CONT -- "-$wpid" 2>/dev/null || kill -CONT "$wpid"; wait "$HOLD_PID" 2>/dev/null
+    fi
+  else echo "  SKIP  no curl: stickiness and frozen-worker checks"; fi
+  out="$("$L" stop --version v0.1 --yes </dev/null 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && [ -z "$(http 18761)" ] && [ -z "$(ls "$WORK"/run/*.state 2>/dev/null)" ] && ok "stop takes the proxy and all workers, no records left" || bad "pool stop (rc $rc)" "$out"
+  [ -z "$(ss -ltnH 'sport >= :18771 and sport <= :18780' 2>/dev/null)" ] && ok "worker ports freed" || bad "worker ports freed"
+fi
 
 echo "-- other hosts are reported, never touched"
 printf 'pid=1\nstarttime=1\nhost=other-host\nversion=v0.1\nport=18761\nbind=127.0.0.1\nenv=/x\nbanner=\nrole=prod\nstarted=1\nlog=/dev/null\n' > "$WORK/run/v0.1@other-host.state"

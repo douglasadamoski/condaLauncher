@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.1.4 (2026-11-16)
+
+- **Pool mode:** `start --workers N` (or `WORKERS=N` in `version.env`) starts N server processes on loopback
+  ports and a Caddy proxy on the normal port. Browsers are pinned to a worker by cookie, new ones go to the
+  least busy worker, health checking is passive only. For tools that block while working (a Shiny app
+  exporting a file) this stops one user from freezing the others. `status` lists the workers, `stop` takes the
+  pool down together, preflight checks the proxy and offers to install it. Workers get `CL_POOL=1` so a tool
+  can keep per-worker scratch space (docs/TOOL_CONTRACT.md). Settings: `CL_POOL_PROXY`, `CL_POOL_COOKIE`,
+  `CL_POOL_TIMEOUT`, `CL_POOL_MAX_BODY`.
+- **Opt-in and menu:** a tool declares `CL_WORKERS_MAX` (>= 2) and optionally `CL_WORKERS_DEFAULT`; only then does *Start server* ask
+  "How many workers?" (from "One process" up to the maximum) and `--workers N` work. Without the declaration `--workers 2` is refused;
+  `--workers 1` always starts one plain process. Workers listen on 127.0.0.1 only; the proxy owns the one public port.
+- A command listed in `CL_REQUIRE_CMDS` that is missing from the env is now offered for install, the same way a
+  missing R or Python package is (`--install`, or `y` at the terminal; `--yes` alone never installs). Before, it
+  only printed a fix line. An entry may be `cmd=condapackage` when the two names differ.
+- The server environment moved into one function (`_server_env`) shared by single and pool starts.
+- Tests: 55 (pool start/stop, stickiness, spread, a worker stuck on a request, the install offer, the opt-in, the default). The pool tests
+  need caddy on PATH or `CL_TEST_CADDY=/path/to/caddy`; without it they are skipped.
+
 ## v0.1.3 (2026-11-08)
 
 - Fixed: when a picker with fewer rows followed a longer one (e.g. the banner question

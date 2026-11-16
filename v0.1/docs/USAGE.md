@@ -61,7 +61,7 @@ After an action the launcher exits and leaves its summary on screen; servers kee
 ```
 launch-x.sh                         menu
 launch-x.sh start [--version V] [--env NAME|PATH] [--banner on|off|TEXT]
-                  [--port N] [--local | --bind ADDR] [--timeout S] [--yes]
+                  [--port N] [--local | --bind ADDR] [--timeout S] [--yes] [--workers N]
 launch-x.sh stop  [--version V | --all] [--force] [--yes]
 launch-x.sh preflight [--version V] [--env E] [--json] [--install]
 launch-x.sh status [--json]         diagnostics printed once
@@ -77,6 +77,38 @@ Without a terminal (cron, `ssh host cmd`, CI), missing choices are taken from th
 records: last started version, env recorded for this host, banner by role. If there is
 no record, the launcher stops and names the flag to pass. `--yes` accepts defaults. It
 **never** installs packages; only `--install`, or a `y` typed at the terminal, does that.
+
+## Pool mode: several workers behind one port
+
+A server that does one thing at a time (a Shiny app building a zip) freezes every other user while it
+works. `start --workers N` (N >= 2), or `WORKERS=N` in a version's `version.env`, starts N copies on
+loopback ports and a Caddy proxy on the normal port, so bookmarks do not change:
+
+```
+launch-x.sh start --version v0.9.4 --workers 4
+```
+
+- **A tool opts in.** Set `CL_WORKERS_MAX` (2 or more) in its config block, after checking TOOL_CONTRACT.md; the
+  default 0 means "not supported", and `--workers 2` is then refused. `CL_WORKERS_DEFAULT` is what you get when
+  nobody chooses (0 or 1 = one plain process).
+- **The menu asks.** For a tool that opted in, *Start server* adds a question after the banner: "How many workers?",
+  from "One process" up to `CL_WORKERS_MAX`, with the default pre-selected. It is skipped with `--workers`, `--yes`
+  or without a terminal, which use `--workers`, else `WORKERS=` in `version.env`, else `CL_WORKERS_DEFAULT`.
+- **Ports:** one public port (the tool's usual one, on the bind address you chose) and N worker ports on
+  127.0.0.1 only, taken from PORT+10 upward (first free). Only the public port is reachable from the network;
+  it is the only one to open in a firewall. Several versions or pools on one host do not collide (each worker
+  takes the first free port).
+- A browser is pinned to one worker by a cookie (not by IP: a lab can share one address). A new browser
+  goes to the worker with the fewest open requests, so a worker busy with a long request is avoided.
+- Health checks are passive only. An active check would mark a busy worker dead and reroute its users
+  to a worker that does not know their session.
+- The proxy gets the usual state file (so `status`, `stop --version V` and `--all` work as before);
+  each worker has `run/<version>~wN@<host>.state` and `.log`. `stop` takes the proxy and its workers.
+- The proxy comes from the env (`CL_POOL_PROXY`, conda-forge `caddy`); if it is missing, preflight fails and
+  offers to install it. The Caddy file is regenerated at every start into `run/<version>@<host>.Caddyfile`.
+- One user on a busy worker still waits for their own work, and so does anyone pinned to that worker
+  before it got busy. The pool prevents *new* users and users on other workers from being blocked.
+- The tool must not share scratch space between workers; see TOOL_CONTRACT.md ("Running as one of several workers").
 
 ## Start, step by step
 
@@ -129,8 +161,10 @@ other hosts are shown and probed over the network, but never stopped.
 | `CL_ENV_NAME`, `CL_ENV_YML`, `CL_ENV_LOCK` | | env name; files searched in the version folder, then the tool root |
 | `CL_REQUIRE_R` | | `shiny bslib>=0.5 DT` |
 | `CL_REQUIRE_PY` | | `import[:dist][op version]`, e.g. `yaml:pyyaml sklearn:scikit-learn>=1.3` |
-| `CL_REQUIRE_FILES`, `CL_REQUIRE_CMDS` | | must exist in the version folder / on PATH in the env |
+| `CL_REQUIRE_FILES`, `CL_REQUIRE_CMDS` | | must exist in the version folder / on PATH in the env. A command may be written `cmd=pkg` when its conda package has another name. A missing command is offered for install exactly like a missing package (`--install`, or a `y` at the terminal; `--yes` alone never installs) |
 | `CL_START_TIMEOUT`, `CL_STOP_TIMEOUT` | 60, 10 | seconds |
+| `CL_WORKERS_MAX`, `CL_WORKERS_DEFAULT` | 0, 0 | the tool supports pool mode up to this many workers (0 = no); workers used when nobody chooses |
+| `CL_POOL_PROXY`, `CL_POOL_COOKIE`, `CL_POOL_TIMEOUT`, `CL_POOL_MAX_BODY` | `caddy`, `clw`, `30m`, `2GB` | pool mode: proxy command (must be in the env), stickiness cookie, proxy read/write timeout, largest upload |
 | `CL_BANNER_TEMPLATE` | `DEVELOPMENT {VERSION} — not for real experiments` | |
 | `CL_VERSION_GLOB`, `CL_VERSION_ENV`, `CL_ENV_RECORD` | `v*`, `deploy/version.env`, `deploy/launcher.local` | |
 | `CL_PORT_SCAN`, `CL_LOG_KEEP`, `CL_LOG_WARN_MB`, `CL_REPORT_KEEP` | 50, 5, 50, 20 | |
