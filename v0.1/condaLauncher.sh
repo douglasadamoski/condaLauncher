@@ -23,7 +23,7 @@ CL_LOGO=""                      # or paste pre-rendered art here (a logo.txt bes
 
 # =============================== ENGINE =====================================
 # Do not edit below this line in a tool's launcher: `upgrade` replaces it.
-CL_LAUNCHER_VERSION="0.1.4"
+CL_LAUNCHER_VERSION="0.1.5"
 
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
@@ -44,6 +44,8 @@ NOW_EPOCH() { printf '%(%s)T' -1; }
 : "${CL_ENTRY:=}"                          # file that must exist inside a version folder
 : "${CL_HEALTH_PATH:=/}"
 : "${CL_PORT_DEFAULT:=8780}"
+: "${CL_PORT_PROD:=}"                      # set both: the banner answer picks the port (on = dev, off = prod)
+: "${CL_PORT_DEV:=}"
 : "${CL_BIND_DEFAULT:=0.0.0.0}"
 : "${CL_ENV_NAME:=}"
 : "${CL_ENV_YML:=environment.yml deploy/environment.yml}"
@@ -606,8 +608,18 @@ load_version() { # name
   fi
   V_ROLE="${V_ROLE:-}"; V_BANNER="${V_BANNER:-}"
   local idx=0 i; for i in "${!VERS[@]}"; do [ "${VERS[i]}" = "$1" ] && idx=$i; done
+  V_PORT_FILE="${V_PORT:-}"
   V_PORT="${V_PORT:-$(( CL_PORT_DEFAULT + idx ))}"
   V_BIND="${V_BIND:-$CL_BIND_DEFAULT}"
+  # Role ports (0.1.5): the tool's CL_PORT_PROD / CL_PORT_DEV win over version.env PORT. Until the banner is
+  # chosen the version's ROLE decides (status, preflight); action_start then follows the banner answer.
+  if role_ports_on; then [ "$V_ROLE" = dev ] && V_PORT="$CL_PORT_DEV" || V_PORT="$CL_PORT_PROD"; fi
+}
+role_ports_on() { [ -n "${CL_PORT_PROD:-}" ] && [ -n "${CL_PORT_DEV:-}" ]; }
+is_role_port() { role_ports_on && { [ "$1" = "$CL_PORT_PROD" ] || [ "$1" = "$CL_PORT_DEV" ]; }; }  # never a fallback
+apply_banner_port() { # BANNER chosen -> V_PORT (a banner means a development server); --port still wins
+  role_ports_on || return 0
+  if [ -n "$BANNER" ]; then V_PORT="$CL_PORT_DEV"; else V_PORT="$CL_PORT_PROD"; fi
 }
 version_index() { local i; for i in "${!VERS[@]}"; do [ "${VERS[i]}" = "$1" ] && { echo "$i"; return 0; }; done; return 1; }
 last_used() { local f="$RUN_DIR/last@$HOST"; [ -r "$f" ] && head -n1 "$f"; }
@@ -929,6 +941,12 @@ run_checks() { # mode: preflight|start
   step_begin
   if [ -r "$VDIR/$CL_VERSION_ENV" ]; then pass "version settings" "${CL_VERSION_ENV} role=${V_ROLE:-?} port=$V_PORT"
   else warn "version settings" "no $CL_VERSION_ENV: using port $V_PORT, no role"; fi
+  if role_ports_on; then
+    step_begin; pass "port by role" "banner on = dev :$CL_PORT_DEV, off = prod :$CL_PORT_PROD ${G_ARR} :$V_PORT"
+    if [ -n "${V_PORT_FILE:-}" ] && [ "$V_PORT_FILE" != "$CL_PORT_PROD" ] && [ "$V_PORT_FILE" != "$CL_PORT_DEV" ]; then
+      step_begin; warn "PORT=$V_PORT_FILE in $CL_VERSION_ENV" "ignored: this tool picks the port from the banner" "remove PORT= from $VNAME/$CL_VERSION_ENV, or use --port"
+    fi
+  fi
   if [ "${V_ROLE:-}" = dev ] && [ -z "$BANNER" ] && [ "$mode" = start ]; then
     step_begin; warn "dev banner" "ROLE=dev but no banner: it will look like production"
   fi
@@ -991,7 +1009,7 @@ run_checks() { # mode: preflight|start
     if port_busy "$PORT" || port_claimed "$PORT" "$sf"; then
       local who; who="$(port_owner "$PORT")"
       local p2=$((PORT + 1)) lim=$((PORT + CL_PORT_SCAN))
-      while (( p2 <= lim )) && { port_busy "$p2" || port_claimed "$p2" "$sf"; }; do p2=$((p2 + 1)); done
+      while (( p2 <= lim )) && { port_busy "$p2" || port_claimed "$p2" "$sf" || is_role_port "$p2"; }; do p2=$((p2 + 1)); done
       if [ -n "${OPT_PORT:-}" ]; then fail "port $PORT" "busy${who:+ ($who)}" "choose another with --port"
       elif (( p2 <= lim )); then warn "port $PORT" "busy${who:+ ($who)} ${G_ARR} using $p2"; PORT=$p2
       else fail "port $PORT" "busy, and no free port up to $lim"; fi
@@ -1210,6 +1228,7 @@ action_start() {
   choose_version "Start which version?" || return 1
   choose_env || return 1
   choose_banner || return 1
+  apply_banner_port
   choose_workers || return 1
   [ "$TTY_OK" = 1 ] && _raw_off
   report_begin start "$VNAME"
@@ -1300,6 +1319,7 @@ action_preflight() {
   choose_version "Preflight which version?" || return 1
   choose_env || return 1
   BANNER="${V_BANNER:-}"
+  if [ -n "${OPT_BANNER:-}" ]; then choose_banner || return 1; apply_banner_port; fi
   [ "$TTY_OK" = 1 ] && _raw_off
   report_begin preflight "$VNAME"
   print_header
@@ -1665,6 +1685,8 @@ CL_ENTRY="$entry"               # must exist for a version folder to be launchab
 $cmdline
 CL_HEALTH_PATH="/"
 CL_PORT_DEFAULT=${port:-8780}   # used when <version>/deploy/version.env has no PORT
+CL_PORT_PROD=""                 # set both to let the banner answer pick the port: banner off = prod, on = dev
+CL_PORT_DEV=""                  # (then PORT= in version.env is ignored; --port still overrides)
 CL_BIND_DEFAULT="0.0.0.0"
 CL_ENV_NAME="$envn"
 CL_ENV_YML="environment.yml deploy/environment.yml"

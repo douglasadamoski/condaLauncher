@@ -2,7 +2,7 @@
 # End-to-end tests for condaLauncher, run against a scratch copy of examples/demo-tool.
 #   bash tests/run_all.sh                 uses the first conda env that has python
 #   CL_TEST_ENV=/path/to/env bash tests/run_all.sh
-# Needs: a conda env with python 3, free ports 18761-18763 (and 18771-18780 for the pool tests, which
+# Needs: a conda env with python 3, free ports 18761-18763 and 18791-18794 (and 18771-18780 for the pool tests, which
 # also need caddy on PATH or CL_TEST_CADDY=/path/to/caddy; without it they are skipped). Leaves nothing running.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; V="$(dirname "$HERE")"
@@ -168,6 +168,33 @@ out="$("$L" status </dev/null)"
 out="$(env -u NO_COLOR FORCE_COLOR=1 CL_COLOR_DEPTH=256 "$L" status </dev/null)"
 [[ $out == *$'\033[38;5;211mCD'* ]] && ok "logo markup coloured ({r} = theme red)" || bad "logo markup coloured" "$(head -3 <<<"$out" | cat -v)"
 rm -f "$mk"
+
+echo "-- port follows the banner (CL_PORT_PROD / CL_PORT_DEV, 0.1.5)"
+"$L" stop --all --yes --force </dev/null >/dev/null 2>&1
+sed 's/^\(CL_PORT_DEFAULT=.*\)$/\1\nCL_PORT_PROD=18791\nCL_PORT_DEV=18792/' "$L" > "$WORK/launch-role.sh"; chmod +x "$WORK/launch-role.sh"
+R="$WORK/launch-role.sh"
+out="$("$R" start --version v0.1 --env "$ENVP" --banner off --yes </dev/null 2>&1)"; rc=$?
+r="$(http 18791)"; [ "$rc" = 0 ] && [[ $r == *"Demo tool v0.1"* && $r != *DEVELOPMENT* ]] && ok "banner off -> prod port 18791" || bad "banner off -> prod port (rc $rc)" "$out"
+out="$("$R" start --version v0.2 --env "$ENVP" --banner on --yes </dev/null 2>&1)"; rc=$?
+r="$(http 18792)"; [ "$rc" = 0 ] && [[ $r == *"DEVELOPMENT v0.2"* ]] && ok "banner on -> dev port 18792 (version.env PORT=18762 ignored)" || bad "banner on -> dev port (rc $rc)" "$out"
+[ -z "$(http 18762)" ] && ok "version.env PORT not used when role ports are set" || bad "version.env PORT used"
+"$R" stop --all --yes --force </dev/null >/dev/null 2>&1
+out="$("$R" start --version v0.1 --env "$ENVP" --yes </dev/null 2>&1)"; rc=$?
+[ -n "$(http 18791)" ] && ok "--yes on a ROLE=prod version: no banner -> prod port" || bad "--yes prod default (rc $rc)" "$out"
+out="$("$R" start --version v0.2 --env "$ENVP" --yes </dev/null 2>&1)"; rc=$?
+r="$(http 18792)"; [[ $r == *DEVELOPMENT* ]] && ok "--yes on a ROLE=dev version: banner -> dev port" || bad "--yes dev default (rc $rc)" "$out"
+"$R" stop --all --yes --force </dev/null >/dev/null 2>&1
+out="$("$R" preflight --version v0.2 --env "$ENVP" </dev/null 2>&1)"
+[[ $out == *"port by role"* && $out == *"PORT=18762"*"ignored"* ]] && ok "preflight shows the role port and warns about the ignored PORT=" || bad "preflight role port" "$out"
+python3 -m http.server 18791 --bind 127.0.0.1 >/dev/null 2>&1 & BLOCK_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -n "$(http 18791)" ] && break; sleep 0.2; done
+out="$("$R" start --version v0.1 --env "$ENVP" --banner off --yes </dev/null 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [[ $out == *"using 18793"* ]] && [ -z "$(http 18792)" ] && ok "busy prod port never falls back onto the dev port (18791 -> 18793)" || bad "role-port fallback (rc $rc)" "$out"
+kill "$BLOCK_PID" 2>/dev/null; BLOCK_PID=""
+"$R" stop --all --yes --force </dev/null >/dev/null 2>&1
+out="$("$R" start --version v0.1 --env "$ENVP" --banner off --port 18794 --yes </dev/null 2>&1)"; rc=$?
+[ -n "$(http 18794)" ] && [ -z "$(http 18791)" ] && ok "--port still overrides the role port" || bad "--port override (rc $rc)" "$out"
+"$R" stop --all --yes --force </dev/null >/dev/null 2>&1; rm -f "$R"
 
 echo "-- init and upgrade"
 mkdir -p "$WORK/newtool/v1.0" && cp "$WORK/v0.1/server.py" "$WORK/newtool/v1.0/app.py"

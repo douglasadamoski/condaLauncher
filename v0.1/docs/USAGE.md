@@ -120,6 +120,9 @@ launch-x.sh start --version v0.9.4 --workers 4
    linux-64 one, otherwise from `environment.yml` with a dry run first, then y/N.
 3. **Dev banner**: yes by default for `ROLE=dev`, no for prod. The text is
    `version.env BANNER`, else `CL_BANNER_TEMPLATE` (`{VERSION} {TOOL} {HOST} {DATE}`).
+   When the tool sets both `CL_PORT_PROD` and `CL_PORT_DEV` (0.1.5), this answer also picks the port: no
+   banner = production = `CL_PORT_PROD`, banner = development = `CL_PORT_DEV`. `PORT=` in `version.env` is then
+   ignored (preflight warns), `--port` still overrides, and a busy role port never falls back onto the other one.
 4. **Checks**: version folder, version.env, package manager, interpreter, every declared
    package (full load, version pins), commands, files, run folder, not already running,
    port (a busy port moves to the next free one with a WARN; `--port` never moves),
@@ -158,6 +161,7 @@ other hosts are shown and probed over the network, but never stopped.
 | `CL_CMD` | per kind | bash array; placeholders `{INTERP} {PORT} {BIND} {VDIR} {PREFIX} {VERSION} {ENTRY}` |
 | `CL_HEALTH_PATH` | / | path probed for HTTP 2xx/3xx |
 | `CL_PORT_DEFAULT`, `CL_BIND_DEFAULT` | 8780, 0.0.0.0 | when version.env has no PORT/BIND (port + version index) |
+| `CL_PORT_PROD`, `CL_PORT_DEV` | | set both and the banner answer picks the port: off = prod, on = dev (0.1.5). Before the banner is chosen (status, preflight) the version's ROLE decides |
 | `CL_ENV_NAME`, `CL_ENV_YML`, `CL_ENV_LOCK` | | env name; files searched in the version folder, then the tool root |
 | `CL_REQUIRE_R` | | `shiny bslib>=0.5 DT` |
 | `CL_REQUIRE_PY` | | `import[:dist][op version]`, e.g. `yaml:pyyaml sklearn:scikit-learn>=1.3` |

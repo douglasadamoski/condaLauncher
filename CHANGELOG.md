@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.1.5 (2026-11-18)
+
+- **Port by role:** a tool that sets both `CL_PORT_PROD` and `CL_PORT_DEV` gets its port from the banner question:
+  no banner (production) starts on `CL_PORT_PROD`, a banner (development) on `CL_PORT_DEV`. `PORT=` in
+  `version.env` is then ignored and preflight warns about it; `--port` still overrides. Before the banner is
+  chosen (`status`, `preflight`) the version's `ROLE` decides. When the role port is busy the usual fallback scan
+  skips both role ports, so production can never land on the development port. Requested for NMD-Predict
+  (8685 prod / 8686 dev).
+- `init` writes the two new (empty) settings into the config block.
+- Tests: 8 more (banner on/off, `--yes` with ROLE=prod/dev, the ignored `PORT=`, the fallback, `--port`); 51 without caddy.
+
 ## v0.1.4 (2026-11-16)
 
 - **Pool mode:** `start --workers N` (or `WORKERS=N` in `version.env`) starts N server processes on loopback
