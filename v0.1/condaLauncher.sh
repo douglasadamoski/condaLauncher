@@ -23,7 +23,7 @@ CL_LOGO=""                      # or paste pre-rendered art here (a logo.txt bes
 
 # =============================== ENGINE =====================================
 # Do not edit below this line in a tool's launcher: `upgrade` replaces it.
-CL_LAUNCHER_VERSION="0.1.5"
+CL_LAUNCHER_VERSION="0.1.6"
 
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
@@ -1045,7 +1045,7 @@ _spawn() {
     [ -n "$TTY" ] && exec {TTY}>&-
     [ -n "$SLEEP_FD" ] && [ "$SLEEP_FD" -ge 0 ] 2>/dev/null && exec {SLEEP_FD}>&-
     _server_env "$port" "$bind" "$pool"
-    if [ "$tenv" = 1 ] && declare -F cl_tool_env >/dev/null; then cl_tool_env || exit 1; fi
+    if [ "$tenv" = 1 ] && declare -F cl_tool_env >/dev/null; then cl_tool_env >>"$log" 2>&1 || exit 1; fi
     echo "=== $(date '+%F %T') condaLauncher start $VNAME ($role) port $port: $*" >>"$log"
     exec setsid -f bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pidf" "$@" >>"$log" 2>&1 </dev/null
   )
@@ -1258,13 +1258,13 @@ action_start() {
     [ -n "$TTY" ] && exec {TTY}>&-
     [ -n "$SLEEP_FD" ] && [ "$SLEEP_FD" -ge 0 ] 2>/dev/null && exec {SLEEP_FD}>&-
     _server_env "$PORT" "$BIND" 0
-    if declare -F cl_tool_env >/dev/null; then cl_tool_env || exit 1; fi
+    if declare -F cl_tool_env >/dev/null; then cl_tool_env >>"$log" 2>&1 || exit 1; fi
     echo "=== $(date '+%F %T') condaLauncher start $VNAME port $PORT: ${cmd[*]}" >>"$log"
     exec setsid -f bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pidf" "${cmd[@]}" >>"$log" 2>&1 </dev/null
   )
   local i pid=""
   for ((i = 0; i < 50; i++)); do [ -s "$pidf" ] && { pid="$(<"$pidf")"; break; }; _nap 0.1; done
-  if ! [[ $pid =~ ^[0-9]+$ ]]; then local -a tl; mapfile -t tl < <(tail -n 10 "$log"); fail "launch" "the process did not start" "" "${tl[@]}"; summary_box "Start $VNAME: FAILED"; return 1; fi
+  if ! [[ $pid =~ ^[0-9]+$ ]]; then local -a tl; mapfile -t tl < <(tail -n 15 "$log"); fail "launch" "the process did not start" "" "${tl[@]}"; summary_box "Start $VNAME: FAILED"; return 1; fi
   rm -f "$pidf"
   local st; st="$(_starttime "$pid")"
   { echo "pid=$pid"; echo "starttime=$st"; echo "host=$HOST"; echo "user=$(id -un)"; echo "version=$VNAME"

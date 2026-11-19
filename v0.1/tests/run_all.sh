@@ -194,7 +194,11 @@ kill "$BLOCK_PID" 2>/dev/null; BLOCK_PID=""
 "$R" stop --all --yes --force </dev/null >/dev/null 2>&1
 out="$("$R" start --version v0.1 --env "$ENVP" --banner off --port 18794 --yes </dev/null 2>&1)"; rc=$?
 [ -n "$(http 18794)" ] && [ -z "$(http 18791)" ] && ok "--port still overrides the role port" || bad "--port override (rc $rc)" "$out"
-"$R" stop --all --yes --force </dev/null >/dev/null 2>&1; rm -f "$R"
+"$R" stop --all --yes --force </dev/null >/dev/null 2>&1
+sed -i '/^# <<< condaLauncher config <<</a cl_tool_env() { echo "HOOK-ERROR-MARKER: missing file x" >\&2; return 1; }' "$R"
+out="$("$R" start --version v0.1 --env "$ENVP" --banner off --port 18795 --yes </dev/null 2>&1)"; rc=$?
+[ "$rc" != 0 ] && [[ $out == *"HOOK-ERROR-MARKER"* ]] && ok "a failing cl_tool_env shows its message in the failure box" || bad "hook error hidden (rc $rc)" "$out"
+rm -f "$R"
 
 echo "-- init and upgrade"
 mkdir -p "$WORK/newtool/v1.0" && cp "$WORK/v0.1/server.py" "$WORK/newtool/v1.0/app.py"

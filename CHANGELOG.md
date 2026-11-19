@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.6 (2026-11-19)
+
+- **A failing `cl_tool_env()` hook is no longer silent.** Its output (stdout and stderr) now goes to the start log
+  before the server command runs, so a start that fails inside the hook (missing file, failed package install)
+  shows the reason in the failure box instead of only "the process did not start". The box shows the last
+  15 log lines (was 10). Found with OmicsSuite, whose hook installs a package before every start.
+- Test: a hook that prints a message and fails must show it (52 without caddy).
+
 ## v0.1.5 (2026-11-18)
 
 - **Port by role:** a tool that sets both `CL_PORT_PROD` and `CL_PORT_DEV` gets its port from the banner question:
